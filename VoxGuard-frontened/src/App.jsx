@@ -8,6 +8,7 @@ import LiveDemo from "./components/LiveDemo";
 import Footer from "./components/Footer";
 import WelcomeAuth from "./components/WelcomeAuth";
 import ProfileDashboard from "./components/ProfileDashboard";
+import LanguageAssistant from "./components/LanguageAssistant";
 import { useState } from "react";
 
 export default function App() {
@@ -16,11 +17,12 @@ export default function App() {
   const [records, setRecords] = useState([]);
 
   if (!authenticated) {
-    return <WelcomeAuth onAuthenticated={() => setAuthenticated(true)} />;
+    return <><WelcomeAuth onAuthenticated={() => setAuthenticated(true)} /><LanguageAssistant /></>;
   }
 
   return (
     <>
+      <LanguageAssistant />
       <Navbar onProfileClick={() => setProfileView(true)} />
       {profileView ? (
         <ProfileDashboard records={records} onBack={() => setProfileView(false)} />
