@@ -1,12 +1,15 @@
 import io
+import json
 import os
+import time
+import hashlib
 from pathlib import Path
 
 import av
 import numpy as np
 import onnxruntime as ort
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -33,8 +36,23 @@ MIN_AUDIO_SECONDS = 2.0
 
 MAX_AUDIO_SECONDS = 30.0
 
+# Voice-biometric enrollment requires a longer, richer sample
+MIN_ENROLL_SECONDS = 110.0
+
+MAX_ENROLL_SECONDS = 180.0
+
 # Silence threshold
 SILENCE_RMS_THRESHOLD = 0.003
+
+# Number of mel-style filters used for the lightweight
+# voiceprint embedding (layer 4 / speaker verification)
+EMBED_N_MELS = 40
+
+EMBED_FFT_SIZE = 512
+
+EMBED_FRAME_MS = 25
+
+EMBED_HOP_MS = 10
 
 
 # ============================================================
@@ -61,6 +79,10 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
     ],
 
     allow_credentials=True,
@@ -580,7 +602,9 @@ def normalize_audio(
 # ============================================================
 
 def prepare_audio(
-    audio_bytes: bytes
+    audio_bytes: bytes,
+    min_seconds: float = MIN_AUDIO_SECONDS,
+    max_seconds: float = MAX_AUDIO_SECONDS,
 ):
 
     # --------------------------------------------------------
@@ -603,11 +627,26 @@ def prepare_audio(
     )
 
     # --------------------------------------------------------
-    # Normalize
+    # Clean (NaN removal + DC offset removal) BEFORE peak
+    # normalization. This "raw" signal is what the layer-1
+    # (acoustic) and layer-2 (spectral) analyzers use, since
+    # peak-normalizing first would erase real amplitude and
+    # dynamic-range information.
     # --------------------------------------------------------
 
-    audio = normalize_audio(
-        audio
+    raw = np.nan_to_num(
+        np.asarray(audio, dtype=np.float32)
+    )
+
+    raw = raw - np.mean(raw)
+
+    # --------------------------------------------------------
+    # Normalize (this version feeds the AASIST model, which
+    # was trained on peak-normalized waveforms)
+    # --------------------------------------------------------
+
+    normalized = normalize_audio(
+        raw
     )
 
     # --------------------------------------------------------
@@ -615,7 +654,7 @@ def prepare_audio(
     # --------------------------------------------------------
 
     duration = (
-        len(audio)
+        len(normalized)
         / TARGET_SAMPLE_RATE
     )
 
@@ -623,7 +662,7 @@ def prepare_audio(
     # Validate minimum duration
     # --------------------------------------------------------
 
-    if duration < MIN_AUDIO_SECONDS:
+    if duration < min_seconds:
 
         raise HTTPException(
 
@@ -631,7 +670,7 @@ def prepare_audio(
 
             detail=(
                 f"Please provide at least "
-                f"{MIN_AUDIO_SECONDS:.0f} seconds "
+                f"{min_seconds:.0f} seconds "
                 "of speech."
             ),
         )
@@ -640,19 +679,18 @@ def prepare_audio(
     # Limit duration
     # --------------------------------------------------------
 
-    if duration > MAX_AUDIO_SECONDS:
+    if duration > max_seconds:
 
         max_samples = int(
-            MAX_AUDIO_SECONDS
+            max_seconds
             * TARGET_SAMPLE_RATE
         )
 
-        audio = audio[
-            :max_samples
-        ]
+        normalized = normalized[:max_samples]
+        raw = raw[:max_samples]
 
         duration = (
-            len(audio)
+            len(normalized)
             / TARGET_SAMPLE_RATE
         )
 
@@ -663,7 +701,7 @@ def prepare_audio(
     rms = float(
         np.sqrt(
             np.mean(
-                np.square(audio)
+                np.square(normalized)
             )
         )
     )
@@ -682,7 +720,8 @@ def prepare_audio(
         )
 
     return (
-        audio,
+        normalized,
+        raw,
         duration,
         original_rate,
         rms,
@@ -1018,6 +1057,451 @@ def run_aasist(
         "message": message,
 
         "recommendation": recommendation,
+    }
+
+
+# ============================================================
+# MULTI-LAYER SUPPLEMENTARY DSP ANALYSIS
+#
+# The AASIST ONNX model above is the only trained, validated
+# spoof-detection model in this system, and it alone drives
+# `risk_score` / `risk_level` / `is_spoof`.
+#
+# The four "layers" below are classic, deterministic signal
+# processing measurements (no neural network) that give a
+# human analyst supporting evidence to look at alongside the
+# AASIST verdict. They are heuristic indicators, not a second
+# certified detector, and are labelled as such in every
+# response.
+# ============================================================
+
+def frame_signal(audio, frame_len, hop_len):
+    """Split 1-D audio into overlapping frames (rows)."""
+
+    audio = np.asarray(audio, dtype=np.float32)
+
+    if len(audio) < frame_len:
+        audio = np.pad(audio, (0, frame_len - len(audio)))
+
+    n_frames = 1 + (len(audio) - frame_len) // hop_len
+
+    indices = (
+        np.arange(frame_len)[None, :]
+        + np.arange(n_frames)[:, None] * hop_len
+    )
+
+    return audio[indices]
+
+
+def _mel_filterbank(sample_rate, n_fft, n_mels, fmin=0.0, fmax=None):
+
+    fmax = fmax or sample_rate / 2
+
+    def hz_to_mel(f):
+        return 2595.0 * np.log10(1.0 + f / 700.0)
+
+    def mel_to_hz(m):
+        return 700.0 * (10.0 ** (m / 2595.0) - 1.0)
+
+    mel_min, mel_max = hz_to_mel(fmin), hz_to_mel(fmax)
+
+    mel_points = np.linspace(mel_min, mel_max, n_mels + 2)
+
+    hz_points = mel_to_hz(mel_points)
+
+    bin_points = np.floor(
+        (n_fft + 1) * hz_points / sample_rate
+    ).astype(int)
+
+    n_bins = n_fft // 2 + 1
+
+    filters = np.zeros((n_mels, n_bins), dtype=np.float32)
+
+    for m in range(1, n_mels + 1):
+
+        left, center, right = bin_points[m - 1], bin_points[m], bin_points[m + 1]
+
+        left, center, right = max(left, 0), max(center, 1), max(right, center + 1)
+
+        for k in range(left, min(center, n_bins)):
+            if center > left:
+                filters[m - 1, k] = (k - left) / (center - left)
+
+        for k in range(center, min(right, n_bins)):
+            if right > center:
+                filters[m - 1, k] = (right - k) / (right - center)
+
+    return filters
+
+
+_MEL_FB_CACHE = _mel_filterbank(
+    TARGET_SAMPLE_RATE, EMBED_FFT_SIZE, EMBED_N_MELS
+)
+
+
+def compute_embedding(raw_audio):
+    """
+    Lightweight, fully-deterministic "voiceprint" for the
+    layer-4 speaker-verification check.
+
+    This is a mean log-mel-energy profile of the speaker's
+    voice (NOT a trained neural speaker embedding / d-vector /
+    x-vector). It is a reasonable, fast proxy for "does this
+    voice's spectral energy distribution resemble the enrolled
+    sample", but it is explicitly a lightweight heuristic, not
+    an enterprise-grade biometric system.
+    """
+
+    frame_len = int(TARGET_SAMPLE_RATE * EMBED_FRAME_MS / 1000)
+    hop_len = int(TARGET_SAMPLE_RATE * EMBED_HOP_MS / 1000)
+
+    frames = frame_signal(raw_audio, frame_len, hop_len)
+
+    window = np.hamming(frame_len).astype(np.float32)
+
+    frames = frames * window[None, :]
+
+    spectrum = np.fft.rfft(frames, n=EMBED_FFT_SIZE, axis=1)
+
+    magnitude = np.abs(spectrum)
+
+    mel_energy = magnitude @ _MEL_FB_CACHE.T
+
+    log_mel = np.log(mel_energy + 1e-6)
+
+    embedding = np.mean(log_mel, axis=0)
+
+    norm = np.linalg.norm(embedding)
+
+    if norm > 0:
+        embedding = embedding / norm
+
+    return embedding.astype(np.float32)
+
+
+def cosine_similarity(a, b):
+
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+
+    if a.shape != b.shape or a.size == 0:
+        return 0.0
+
+    denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-8
+
+    return float(np.clip(np.dot(a, b) / denom, -1.0, 1.0))
+
+
+def _clamp(value, low=0.0, high=100.0):
+    return float(min(max(value, low), high))
+
+
+def _status_from_score(score):
+
+    if score >= 66:
+        return "flag"
+
+    if score >= 33:
+        return "caution"
+
+    return "pass"
+
+
+# ------------------------------------------------------------
+# LAYER 1 — ACOUSTIC ANALYSIS
+# ------------------------------------------------------------
+
+def compute_acoustic_layer(raw_audio, sample_rate=TARGET_SAMPLE_RATE):
+
+    audio = np.asarray(raw_audio, dtype=np.float32)
+
+    rms = float(np.sqrt(np.mean(np.square(audio)) + 1e-12))
+
+    peak = float(np.max(np.abs(audio)) + 1e-12)
+
+    sign_changes = np.sum(
+        np.abs(np.diff(np.sign(audio))) > 0
+    )
+
+    zcr_per_sec = float(sign_changes) / 2.0 / (len(audio) / sample_rate)
+
+    p95 = np.percentile(np.abs(audio), 95) + 1e-6
+
+    p20 = np.percentile(np.abs(audio), 20) + 1e-6
+
+    dynamic_range_db = float(20 * np.log10(p95 / p20))
+
+    frame_len = int(sample_rate * 0.02)
+
+    frames = frame_signal(audio, frame_len, frame_len)
+
+    frame_rms = np.sqrt(np.mean(np.square(frames), axis=1) + 1e-12)
+
+    silence_ratio = float(
+        np.mean(frame_rms < (0.06 * peak))
+    )
+
+    # Heuristic anomaly scoring: natural conversational speech
+    # usually shows moderate dynamic range and a healthy amount
+    # of micro-pauses/breaths. Extremely flat dynamic range or
+    # near-zero silence ratio (typical of some TTS renders) or
+    # excessive silence (clipped/looped samples) push the score up.
+    dr_risk = _clamp(100 - (dynamic_range_db / 28.0) * 100)
+
+    silence_risk = _clamp(
+        abs(silence_ratio - 0.22) / 0.22 * 100
+    )
+
+    score = _clamp(0.6 * dr_risk + 0.4 * silence_risk)
+
+    status = _status_from_score(score)
+
+    verdict = {
+        "pass": "Amplitude dynamics and pause patterns look consistent with natural speech.",
+        "caution": "Amplitude dynamics show some deviation from typical natural speech patterns.",
+        "flag": "Unusually flat dynamic range or pause pattern — a trait sometimes seen in synthetic audio.",
+    }[status]
+
+    return {
+        "name": "Acoustic Analysis",
+        "score": round(score, 1),
+        "status": status,
+        "verdict": verdict,
+        "metrics": {
+            "rms_energy": round(rms, 4),
+            "peak_amplitude": round(peak, 4),
+            "zero_crossing_rate_hz": round(zcr_per_sec, 1),
+            "dynamic_range_db": round(dynamic_range_db, 1),
+            "silence_ratio_pct": round(silence_ratio * 100, 1),
+        },
+    }
+
+
+# ------------------------------------------------------------
+# LAYER 2 — SPECTRAL ANALYSIS
+# ------------------------------------------------------------
+
+def compute_spectral_layer(raw_audio, sample_rate=TARGET_SAMPLE_RATE):
+
+    audio = np.asarray(raw_audio, dtype=np.float32)
+
+    frame_len = int(sample_rate * 0.032)
+
+    hop_len = int(sample_rate * 0.016)
+
+    frames = frame_signal(audio, frame_len, hop_len)
+
+    window = np.hamming(frame_len).astype(np.float32)
+
+    spectrum = np.abs(np.fft.rfft(frames * window[None, :], axis=1))
+
+    mean_spectrum = np.mean(spectrum, axis=0) + 1e-8
+
+    freqs = np.fft.rfftfreq(frame_len, d=1.0 / sample_rate)
+
+    total_energy = float(np.sum(mean_spectrum))
+
+    spectral_centroid = float(
+        np.sum(freqs * mean_spectrum) / total_energy
+    )
+
+    geo_mean = float(np.exp(np.mean(np.log(mean_spectrum))))
+
+    arith_mean = float(np.mean(mean_spectrum))
+
+    spectral_flatness = float(geo_mean / arith_mean)
+
+    cumulative = np.cumsum(mean_spectrum)
+
+    rolloff_idx = int(np.searchsorted(cumulative, 0.85 * total_energy))
+
+    rolloff_idx = min(rolloff_idx, len(freqs) - 1)
+
+    spectral_rolloff = float(freqs[rolloff_idx])
+
+    high_freq_energy = float(np.sum(mean_spectrum[freqs > 7000]))
+
+    high_freq_ratio = float(high_freq_energy / total_energy)
+
+    # Many neural vocoders are band-limited (little energy
+    # above ~7-8kHz) and produce an over-smoothed spectral
+    # envelope (low flatness / low natural "roughness").
+    hf_risk = _clamp((1 - high_freq_ratio / 0.05) * 100)
+
+    flatness_risk = _clamp(abs(spectral_flatness - 0.12) / 0.12 * 100)
+
+    score = _clamp(0.55 * hf_risk + 0.45 * flatness_risk)
+
+    status = _status_from_score(score)
+
+    verdict = {
+        "pass": "Frequency content extends naturally into the high band with organic spectral texture.",
+        "caution": "Some spectral smoothing or reduced high-frequency content detected.",
+        "flag": "High-frequency roll-off and spectral smoothness resemble vocoder / TTS synthesis artifacts.",
+    }[status]
+
+    return {
+        "name": "Spectral Analysis",
+        "score": round(score, 1),
+        "status": status,
+        "verdict": verdict,
+        "metrics": {
+            "spectral_centroid_hz": round(spectral_centroid, 1),
+            "spectral_flatness": round(spectral_flatness, 4),
+            "spectral_rolloff_hz": round(spectral_rolloff, 1),
+            "high_freq_energy_ratio_pct": round(high_freq_ratio * 100, 2),
+        },
+    }
+
+
+# ------------------------------------------------------------
+# LAYER 3 — PROSODY ANALYSIS
+# ------------------------------------------------------------
+
+def compute_prosody_layer(raw_audio, sample_rate=TARGET_SAMPLE_RATE):
+
+    audio = np.asarray(raw_audio, dtype=np.float32)
+
+    frame_len = int(sample_rate * 0.03)
+
+    hop_len = int(sample_rate * 0.01)
+
+    frames = frame_signal(audio, frame_len, hop_len)
+
+    window = np.hamming(frame_len).astype(np.float32)
+
+    min_lag = int(sample_rate / 400)   # 400 Hz upper bound
+    max_lag = int(sample_rate / 70)    # 70 Hz lower bound
+
+    pitches = []
+
+    for frame in frames:
+
+        f = frame * window
+
+        energy = np.sum(f * f)
+
+        if energy < 1e-6:
+            continue
+
+        corr = np.correlate(f, f, mode="full")[len(f) - 1:]
+
+        segment = corr[min_lag:max_lag]
+
+        if len(segment) == 0:
+            continue
+
+        peak_lag = int(np.argmax(segment)) + min_lag
+
+        peak_val = corr[peak_lag]
+
+        normalized_peak = peak_val / (corr[0] + 1e-8)
+
+        if normalized_peak > 0.32:
+            pitches.append(sample_rate / peak_lag)
+
+    voiced_ratio = float(len(pitches) / max(len(frames), 1))
+
+    if len(pitches) >= 4:
+
+        pitches = np.array(pitches)
+
+        pitch_mean = float(np.mean(pitches))
+
+        pitch_std = float(np.std(pitches))
+
+        jitter_pct = float(
+            np.mean(np.abs(np.diff(pitches))) / (pitch_mean + 1e-6) * 100
+        )
+
+    else:
+
+        pitch_mean = 0.0
+        pitch_std = 0.0
+        jitter_pct = 0.0
+
+    # Very low pitch variability ("too flat/monotone") or
+    # unnaturally low jitter is a pattern sometimes seen in
+    # synthetic speech; extremely low voiced ratio suggests the
+    # analysis window had too little usable speech.
+    if pitch_mean > 0:
+        variability_risk = _clamp(100 - (pitch_std / 18.0) * 100)
+        jitter_risk = _clamp(100 - (jitter_pct / 3.0) * 100)
+    else:
+        variability_risk = 50.0
+        jitter_risk = 50.0
+
+    coverage_risk = _clamp((1 - voiced_ratio / 0.55) * 100) if voiced_ratio < 0.55 else 0.0
+
+    score = _clamp(0.45 * variability_risk + 0.35 * jitter_risk + 0.20 * coverage_risk)
+
+    status = _status_from_score(score)
+
+    verdict = {
+        "pass": "Pitch contour shows natural micro-variation consistent with human speech.",
+        "caution": "Pitch variation is somewhat lower than typical natural speech.",
+        "flag": "Unusually flat or monotone pitch contour — a pattern often seen in synthetic voices.",
+    }[status]
+
+    return {
+        "name": "Prosody Analysis",
+        "score": round(score, 1),
+        "status": status,
+        "verdict": verdict,
+        "metrics": {
+            "pitch_mean_hz": round(pitch_mean, 1),
+            "pitch_std_hz": round(pitch_std, 2),
+            "jitter_pct": round(jitter_pct, 2),
+            "voiced_ratio_pct": round(voiced_ratio * 100, 1),
+        },
+    }
+
+
+# ------------------------------------------------------------
+# LAYER 4 — SPEAKER VERIFICATION
+# ------------------------------------------------------------
+
+def compute_speaker_layer(raw_audio, enrolled_embedding):
+
+    live_embedding = compute_embedding(raw_audio)
+
+    if enrolled_embedding is None:
+
+        return {
+            "name": "Speaker Verification",
+            "enrolled": False,
+            "status": "unavailable",
+            "verdict": (
+                "No enrolled voiceprint on file for this user. "
+                "Enroll a voice sample to enable speaker verification."
+            ),
+            "similarity_pct": None,
+            "match": None,
+            "live_embedding": live_embedding.tolist(),
+        }
+
+    similarity = cosine_similarity(live_embedding, enrolled_embedding)
+
+    similarity_pct = _clamp((similarity + 1) / 2 * 100)
+
+    match = similarity_pct >= 78
+
+    status = "pass" if match else ("caution" if similarity_pct >= 60 else "flag")
+
+    verdict = {
+        "pass": "This voice's spectral profile closely matches the enrolled voiceprint.",
+        "caution": "Partial match to the enrolled voiceprint — some deviation detected.",
+        "flag": "This voice's spectral profile does not match the enrolled voiceprint.",
+    }[status]
+
+    return {
+        "name": "Speaker Verification",
+        "enrolled": True,
+        "status": status,
+        "verdict": verdict,
+        "similarity_pct": round(similarity_pct, 1),
+        "match": match,
+        "live_embedding": live_embedding.tolist(),
     }
 
 
