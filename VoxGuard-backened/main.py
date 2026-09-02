@@ -1659,6 +1659,7 @@ async def analyze_audio(
 
     (
         audio,
+        raw_audio,
         duration,
         original_sample_rate,
         rms,

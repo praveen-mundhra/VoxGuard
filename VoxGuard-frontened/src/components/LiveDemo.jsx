@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import {
   Mic,
   Square,
@@ -9,7 +9,7 @@ import {
   Upload
 } from "lucide-react";
 
-export default function LiveDemo() {
+export default function LiveDemo({ onAnalysisComplete }) {
   const [recording, setRecording] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
 
@@ -49,7 +49,7 @@ export default function LiveDemo() {
           type: recorder.mimeType
         });
 
-        await analyzeAudio(audioBlob);
+        await analyzeAudio(audioBlob, "voice-recording.webm");
       };
 
       recorder.start();
@@ -81,7 +81,7 @@ export default function LiveDemo() {
   /*
    * Send audio to Python backend
    */
-  const analyzeAudio = async (audioBlob) => {
+  const analyzeAudio = async (audioBlob, fileName = "voice-sample") => {
     try {
       setAnalyzing(true);
       setError("");
@@ -109,6 +109,13 @@ export default function LiveDemo() {
       const data = await response.json();
 
       setResult(data);
+      onAnalysisComplete?.({
+        id: `${Date.now()}-${fileName}`,
+        fileName,
+        audioUrl: URL.createObjectURL(audioBlob),
+        createdAt: new Date().toISOString(),
+        result: data,
+      });
     } catch (err) {
       console.error(err);
 
@@ -425,7 +432,7 @@ export default function LiveDemo() {
               const file = event.target.files?.[0];
 
               if (file) {
-                await analyzeAudio(file);
+                await analyzeAudio(file, file.name);
               }
             }}
           />
