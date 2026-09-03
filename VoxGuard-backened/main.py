@@ -9,7 +9,7 @@ import av
 import numpy as np
 import onnxruntime as ort
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 
@@ -35,6 +35,12 @@ WINDOW_SECONDS = (
 MIN_AUDIO_SECONDS = 2.0
 
 MAX_AUDIO_SECONDS = 30.0
+
+# Persistent raw-PCM streaming analysis window.
+STREAM_CHUNK_SECONDS = 0.2
+STREAM_WINDOW_SECONDS = 1.5
+STREAM_CHUNK_SAMPLES = int(TARGET_SAMPLE_RATE * STREAM_CHUNK_SECONDS)
+STREAM_WINDOW_SAMPLES = int(TARGET_SAMPLE_RATE * STREAM_WINDOW_SECONDS)
 
 # Voice-biometric enrollment requires a longer, richer sample
 MIN_ENROLL_SECONDS = 110.0
@@ -1502,6 +1508,80 @@ def compute_voice_presence_layer(raw_audio, sample_rate=TARGET_SAMPLE_RATE):
     }
 
 
+def compute_explainability_metadata(raw_audio, sample_rate=TARGET_SAMPLE_RATE):
+    """Return timestamped, heuristic evidence supporting the analysis."""
+
+    audio = np.asarray(raw_audio, dtype=np.float32)
+    events = []
+
+    def add_event(tag, timestamp, evidence, severity="caution", end_timestamp=None):
+        event = {
+            "tag": tag,
+            "timestamp_seconds": round(float(timestamp), 3),
+            "severity": severity,
+            "evidence": evidence,
+        }
+        if end_timestamp is not None:
+            event["timestamp_end_seconds"] = round(float(end_timestamp), 3)
+        events.append(event)
+
+    frame_len = int(sample_rate * 0.032)
+    hop_len = int(sample_rate * 0.016)
+    frames = frame_signal(audio, frame_len, hop_len)
+    window = np.hamming(frame_len).astype(np.float32)
+    spectra = np.abs(np.fft.rfft(frames * window[None, :], axis=1)) + 1e-8
+    normalized_spectra = spectra / np.sum(spectra, axis=1, keepdims=True)
+
+    if len(normalized_spectra) > 1:
+        spectral_flux = np.mean(
+            np.maximum(normalized_spectra[1:] - normalized_spectra[:-1], 0),
+            axis=1,
+        )
+        flux_threshold = max(float(np.percentile(spectral_flux, 97)), 0.08)
+        discontinuities = np.flatnonzero(spectral_flux >= flux_threshold)
+        for frame_index in discontinuities[:5]:
+            timestamp = (frame_index + 1) * hop_len / sample_rate
+            add_event(
+                "spectral_discontinuity",
+                timestamp,
+                f"Spectral flux {spectral_flux[frame_index]:.3f} exceeded the {flux_threshold:.3f} event threshold.",
+            )
+
+    frame_rms = np.sqrt(np.mean(np.square(frames), axis=1) + 1e-12)
+    silence_threshold = max(float(np.percentile(frame_rms, 10)) * 1.8, 1e-5)
+    voiced = frame_rms > silence_threshold
+    silence_ratio = float(np.mean(~voiced))
+    if silence_ratio < 0.08 and len(audio) / sample_rate >= 1.0:
+        add_event(
+            "missing_breath_cycles",
+            0.0,
+            f"Only {silence_ratio * 100:.1f}% of frames contained pause-like low energy.",
+        )
+
+    p95 = float(np.percentile(np.abs(audio), 95) + 1e-6)
+    p20 = float(np.percentile(np.abs(audio), 20) + 1e-6)
+    dynamic_range_db = float(20 * np.log10(p95 / p20))
+    mean_spectrum = np.mean(spectra, axis=0)
+    freqs = np.fft.rfftfreq(frame_len, d=1.0 / sample_rate)
+    high_freq_ratio = float(np.sum(mean_spectrum[freqs > 7000]) / np.sum(mean_spectrum))
+    if dynamic_range_db < 8.0 or high_freq_ratio < 0.01:
+        add_event(
+            "replay_acoustic_mismatch",
+            0.0,
+            f"Dynamic range {dynamic_range_db:.1f} dB and high-frequency energy {high_freq_ratio * 100:.2f}% suggest an acoustically constrained capture.",
+        )
+
+    return {
+        "events": events,
+        "reason_tags": [
+            f"{event['tag']} at {event['timestamp_seconds']:.3f}s"
+            for event in events
+        ],
+        "timestamp_basis": "Audio-relative seconds; event timestamps identify frame starts.",
+        "heuristic": True,
+    }
+
+
 # ------------------------------------------------------------
 # LAYER 5 — SPEAKER VERIFICATION
 # ------------------------------------------------------------
@@ -1547,6 +1627,119 @@ def compute_speaker_layer(raw_audio, enrolled_embedding):
         "similarity_pct": round(similarity_pct, 1),
         "match": match,
         "live_embedding": live_embedding.tolist(),
+    }
+
+
+# ============================================================
+# REAL-TIME PCM STREAMING
+# ============================================================
+
+class PCMStreamRingBuffer:
+    """Fixed-size FIFO ring buffer for one mono PCM stream."""
+
+    def __init__(self, capacity):
+        self._buffer = np.zeros(capacity, dtype=np.float32)
+        self._capacity = capacity
+        self._size = 0
+        self._write_index = 0
+
+    @property
+    def size(self):
+        return self._size
+
+    def append(self, samples):
+        samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+
+        if samples.size >= self._capacity:
+            self._buffer[:] = samples[-self._capacity:]
+            self._size = self._capacity
+            self._write_index = 0
+            return
+
+        first_count = min(samples.size, self._capacity - self._write_index)
+        self._buffer[self._write_index:self._write_index + first_count] = samples[:first_count]
+        remaining = samples.size - first_count
+
+        if remaining:
+            self._buffer[:remaining] = samples[first_count:]
+
+        self._write_index = (self._write_index + samples.size) % self._capacity
+        self._size = min(self._capacity, self._size + samples.size)
+
+    def latest(self, count):
+        if count > self._size:
+            raise ValueError("Not enough samples in the PCM ring buffer.")
+
+        start = (self._write_index - count) % self._capacity
+        if start + count <= self._capacity:
+            return self._buffer[start:start + count].copy()
+
+        first_count = self._capacity - start
+        return np.concatenate((self._buffer[start:], self._buffer[:count - first_count]))
+
+
+def decode_pcm_stream_chunk(payload, sample_rate, channels, encoding):
+    """Decode one binary WebSocket message into mono 16 kHz float audio."""
+
+    if payload[:4] == b"RIFF" and payload[8:12] == b"WAVE":
+        audio, original_rate = decode_audio(payload)
+        if original_rate != TARGET_SAMPLE_RATE:
+            audio = resample_audio(audio, original_rate)
+        return audio
+
+    if sample_rate != TARGET_SAMPLE_RATE:
+        raise ValueError("Raw PCM stream must use a 16000 Hz sample rate.")
+
+    if channels < 1:
+        raise ValueError("PCM channel count must be at least 1.")
+
+    if encoding == "pcm_s16le":
+        bytes_per_sample = 2
+        dtype = np.dtype("<i2")
+        scale = 32768.0
+    elif encoding == "pcm_f32le":
+        bytes_per_sample = 4
+        dtype = np.dtype("<f4")
+        scale = 1.0
+    else:
+        raise ValueError("Encoding must be pcm_s16le or pcm_f32le.")
+
+    bytes_per_frame = bytes_per_sample * channels
+    if len(payload) % bytes_per_frame:
+        raise ValueError("PCM chunk ends mid-sample or mid-channel frame.")
+
+    samples = np.frombuffer(payload, dtype=dtype).astype(np.float32) / scale
+    if channels > 1:
+        samples = samples.reshape(-1, channels).mean(axis=1)
+
+    return samples
+
+
+def analyze_stream_window(window):
+    """Run the existing detector over one 1.5-second stream window."""
+
+    normalized = normalize_audio(window)
+    result = run_aasist(normalized)
+    voice_analysis = compute_voice_presence_layer(window)
+    explainability = compute_explainability_metadata(window)
+    confidence = max(result["spoof_probability"], result["bonafide_probability"])
+
+    return {
+        "success": True,
+        "model": "AASIST ONNX",
+        "window_seconds": STREAM_WINDOW_SECONDS,
+        "processed_sample_rate": TARGET_SAMPLE_RATE,
+        "raw_logits": result["raw_logits"],
+        "is_spoof": result["is_spoof"],
+        "risk_score": result["risk_score"],
+        "risk_level": result["risk_level"],
+        "spoof_probability": result["spoof_probability"],
+        "bonafide_probability": result["bonafide_probability"],
+        "confidence": round(confidence, 2),
+        "message": result["message"],
+        "recommendation": result["recommendation"],
+        "voice_analysis": voice_analysis,
+        "explainability": explainability,
     }
 
 
@@ -1628,6 +1821,83 @@ async def api_status():
 
         "error": model_error,
     }
+
+
+# ============================================================
+# REAL-TIME PCM WEBSOCKET
+# ============================================================
+
+@app.websocket("/api/analyze/stream")
+async def analyze_pcm_stream(websocket: WebSocket):
+    """Accept raw PCM/WAV messages and emit sliding-window analyses."""
+
+    await websocket.accept()
+
+    if onnx_session is None:
+        await websocket.send_json({
+            "success": False,
+            "error": "AASIST ONNX model is not available.",
+        })
+        await websocket.close(code=1013)
+        return
+
+    sample_rate = TARGET_SAMPLE_RATE
+    channels = 1
+    encoding = "pcm_s16le"
+    ring_buffer = PCMStreamRingBuffer(STREAM_WINDOW_SAMPLES)
+    total_samples = 0
+    next_analysis_sample = STREAM_WINDOW_SAMPLES
+
+    try:
+        while True:
+            message = await websocket.receive()
+
+            if message.get("type") == "websocket.disconnect":
+                break
+
+            if message.get("text") is not None:
+                try:
+                    control = json.loads(message["text"])
+                    if control.get("type") == "config":
+                        sample_rate = int(control.get("sample_rate", sample_rate))
+                        channels = int(control.get("channels", channels))
+                        encoding = control.get("encoding", encoding)
+                        await websocket.send_json({
+                            "success": True,
+                            "type": "config_ack",
+                            "sample_rate": sample_rate,
+                            "channels": channels,
+                            "encoding": encoding,
+                        })
+                    continue
+                except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                    await websocket.send_json({"success": False, "error": f"Invalid stream control message: {exc}"})
+                    continue
+
+            payload = message.get("bytes")
+            if not payload:
+                continue
+
+            try:
+                samples = decode_pcm_stream_chunk(payload, sample_rate, channels, encoding)
+            except (HTTPException, ValueError) as exc:
+                detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+                await websocket.send_json({"success": False, "error": detail})
+                continue
+
+            ring_buffer.append(samples)
+            total_samples += samples.size
+
+            while total_samples >= next_analysis_sample:
+                analysis = analyze_stream_window(ring_buffer.latest(STREAM_WINDOW_SAMPLES))
+                analysis["type"] = "analysis"
+                analysis["stream_sample_end"] = next_analysis_sample
+                analysis["stream_seconds"] = round(next_analysis_sample / TARGET_SAMPLE_RATE, 3)
+                await websocket.send_json(analysis)
+                next_analysis_sample += STREAM_CHUNK_SAMPLES
+
+    except WebSocketDisconnect:
+        pass
 
 
 # ============================================================
@@ -1721,6 +1991,10 @@ async def analyze_audio(
     )
 
     voice_analysis = compute_voice_presence_layer(
+        raw_audio
+    )
+
+    explainability = compute_explainability_metadata(
         raw_audio
     )
 
@@ -1824,6 +2098,8 @@ async def analyze_audio(
 
         "voice_analysis": voice_analysis,
 
+        "explainability": explainability,
+
         "analysis_window_seconds": round(
             WINDOW_SECONDS,
             2
@@ -1869,6 +2145,7 @@ async def analyze_live_audio(
     )
     result = run_aasist(audio)
     voice_analysis = compute_voice_presence_layer(raw_audio)
+    explainability = compute_explainability_metadata(raw_audio)
     confidence = max(
         result["spoof_probability"],
         result["bonafide_probability"],
@@ -1892,6 +2169,7 @@ async def analyze_live_audio(
         "message": result["message"],
         "recommendation": result["recommendation"],
         "voice_analysis": voice_analysis,
+        "explainability": explainability,
         "analysis_window_seconds": round(WINDOW_SECONDS, 2),
         "live": True,
     }
