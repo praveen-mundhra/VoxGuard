@@ -141,3 +141,28 @@ body { margin: 0; min-width: 320px; background: #07111f; }
     0 0 0 1px rgba(56, 189, 248, 0.15),
     0 0 50px rgba(56, 189, 248, 0.08);
 }
+
+.senior-mode { position: fixed; right: 22px; bottom: 78px; z-index: 120; font-family: 'DM Sans', sans-serif; }
+.senior-trigger { display: inline-flex; align-items: center; gap: 8px; min-height: 48px; padding: 12px 17px; color: #241006; background: #f8b84e; border: 2px solid #ffe3a4; border-radius: 10px; cursor: pointer; font: inherit; font-size: 13px; font-weight: 800; box-shadow: 0 10px 30px rgba(248, 184, 78, .3); }
+.senior-trigger:hover { background: #ffd37a; }
+.senior-overlay { position: fixed; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(4, 10, 18, .86); backdrop-filter: blur(7px); }
+.senior-panel { position: relative; width: min(560px, 100%); padding: clamp(28px, 6vw, 54px); color: #fff8e8; background: #27150b; border: 3px solid #f8b84e; border-radius: 18px; box-shadow: 0 24px 80px rgba(0, 0, 0, .5); }
+.senior-close { position: absolute; top: 16px; right: 16px; display: grid; place-items: center; width: 46px; height: 46px; color: #ffe8bd; background: transparent; border: 1px solid #754925; border-radius: 8px; cursor: pointer; }
+.senior-alert-icon { display: grid; place-items: center; width: 72px; height: 72px; color: #27150b; background: #f8b84e; border-radius: 50%; }
+.senior-kicker { margin: 25px 0 8px; color: #f8b84e; font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.senior-panel h2 { max-width: 430px; margin: 0; color: #fff8e8; font-family: 'Space Grotesk', sans-serif; font-size: clamp(30px, 7vw, 48px); line-height: 1.02; }
+.senior-copy { max-width: 440px; margin: 17px 0 25px; color: #f4d9b2; font-size: 18px; line-height: 1.5; }
+.senior-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.senior-call-button, .senior-speak-button, .senior-sos button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 64px; padding: 14px 16px; border-radius: 9px; cursor: pointer; font: inherit; font-size: 17px; font-weight: 800; text-decoration: none; }
+.senior-call-button { color: #201006; background: #f8b84e; }
+.senior-speak-button { color: #fff8e8; background: #512a15; border: 2px solid #a4652e; }
+.senior-language { display: grid; gap: 8px; margin-top: 21px; color: #f4d9b2; font-size: 13px; font-weight: 700; }
+.senior-language select, .senior-sos input { width: 100%; min-height: 48px; padding: 10px 12px; color: #fff8e8; background: #1c1009; border: 1px solid #a4652e; border-radius: 7px; font: inherit; font-size: 16px; }
+.senior-sos { display: grid; gap: 11px; margin-top: 26px; padding-top: 23px; border-top: 1px solid #754925; }
+.senior-sos strong, .senior-sos span { display: block; }
+.senior-sos strong { font-size: 19px; }
+.senior-sos span { margin-top: 4px; color: #f4d9b2; font-size: 13px; }
+.senior-sos button { min-height: 54px; color: #fff8e8; background: #a93624; border: 0; }
+.senior-sos button:hover { background: #c94931; }
+.senior-sos p { margin: 0; color: #f8b84e; font-size: 13px; line-height: 1.4; }
+@media (max-width: 560px) { .senior-mode { right: 16px; bottom: 72px; } .senior-trigger span { display: none; } .senior-actions { grid-template-columns: 1fr; } .senior-panel { padding: 28px 22px; } }

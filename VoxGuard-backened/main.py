@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import time
 import hashlib
 from pathlib import Path
@@ -11,6 +12,11 @@ import onnxruntime as ort
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from fraud_engine import classify_transcript
+from incidents import build_family_sos, build_incident_card, build_incident_payload
+from registry import TelecomRegistryService
 
 
 # ============================================================
@@ -114,6 +120,35 @@ model_output_name = None
 model_input_shape = None
 
 model_output_shape = None
+
+registry_service = TelecomRegistryService()
+
+
+class TranscriptRequest(BaseModel):
+    transcript: str = Field(min_length=1, max_length=20_000)
+
+
+class RegistryNumberRequest(BaseModel):
+    phone_number: str = Field(min_length=7, max_length=20)
+
+
+class DeviceRequest(BaseModel):
+    imei: str | None = Field(default=None, max_length=32)
+    device_id: str | None = Field(default=None, max_length=128)
+
+
+class IncidentRequest(BaseModel):
+    transcript_analysis: dict
+    caller_number: str | None = Field(default=None, max_length=20)
+    call_started_at: str | None = None
+    victim_consent: bool = False
+    active_debit: bool = False
+
+
+class SosRequest(BaseModel):
+    guardian_contact: str = Field(min_length=3, max_length=160)
+    call_details: dict = Field(default_factory=dict)
+    language: str = "hi"
 
 
 # ============================================================
@@ -1582,6 +1617,75 @@ def compute_explainability_metadata(raw_audio, sample_rate=TARGET_SAMPLE_RATE):
     }
 
 
+SCAM_KEYWORD_ALIASES = {
+    "UPI PIN": ("upi pin", "upi mpin", "upi pin number", "yupi pin"),
+    "Digital Arrest": ("digital arrest", "digital rest", "digital arest"),
+    "CBI": ("cbi", "c b i", "see b i", "cbee eye"),
+    "KYC update": ("kyc update", "kyc updation", "kyc renewal", "kyc"),
+    "police verification": (
+        "police verification",
+        "police verify",
+        "police varification",
+    ),
+}
+
+
+def compute_scam_keyword_layer(transcript, explainability, duration_seconds):
+    """Spot scam-script phrases in supplied text or phonetic ASR output."""
+
+    normalized_transcript = re.sub(
+        r"[^a-z0-9]+", " ", (transcript or "").lower()
+    ).strip()
+    normalized_transcript = re.sub(r"\s+", " ", normalized_transcript)
+    matches = []
+
+    for keyword, aliases in SCAM_KEYWORD_ALIASES.items():
+        matched_alias = next(
+            (alias for alias in aliases if f" {alias} " in f" {normalized_transcript} "),
+            None,
+        )
+        if matched_alias:
+            matches.append({
+                "keyword": keyword,
+                "matched_text": matched_alias,
+                "detection_method": "text_or_phonetic_transcript",
+                "timestamp_seconds": 0.0,
+                "timestamp_end_seconds": round(float(duration_seconds), 3),
+            })
+
+    acoustic_anomaly = bool(explainability.get("events"))
+    keyword_count = len(matches)
+    base_boost = min(keyword_count * 12.0, 36.0)
+    cooccurrence_boost = 20.0 if keyword_count and acoustic_anomaly else 0.0
+
+    return {
+        "matched": bool(matches),
+        "matched_keywords": matches,
+        "acoustic_anomaly_cooccurrence": acoustic_anomaly and bool(matches),
+        "risk_boost": round(base_boost + cooccurrence_boost, 1),
+        "timestamp_basis": (
+            "Sample-level transcript timing; provide word-level ASR timestamps "
+            "to localize individual keywords."
+        ),
+    }
+
+
+def compute_fraud_risk(result, scam_keyword_layer):
+    """Combine model spoof risk with bounded scam-script evidence."""
+
+    fraud_risk_score = _clamp(
+        result["risk_score"] + scam_keyword_layer["risk_boost"]
+    )
+    if fraud_risk_score >= 75:
+        fraud_risk_level = "HIGH"
+    elif fraud_risk_score >= 50:
+        fraud_risk_level = "MEDIUM"
+    else:
+        fraud_risk_level = "LOW"
+
+    return round(fraud_risk_score, 1), fraud_risk_level
+
+
 # ------------------------------------------------------------
 # LAYER 5 — SPEAKER VERIFICATION
 # ------------------------------------------------------------
@@ -1715,13 +1819,23 @@ def decode_pcm_stream_chunk(payload, sample_rate, channels, encoding):
     return samples
 
 
-def analyze_stream_window(window):
+def analyze_stream_window(window, transcript=None):
     """Run the existing detector over one 1.5-second stream window."""
 
     normalized = normalize_audio(window)
+    india_fraud_analysis = classify_transcript(transcript or "")
     result = run_aasist(normalized)
     voice_analysis = compute_voice_presence_layer(window)
     explainability = compute_explainability_metadata(window)
+    scam_keyword_analysis = compute_scam_keyword_layer(
+        transcript,
+        explainability,
+        STREAM_WINDOW_SECONDS,
+    )
+    fraud_risk_score, fraud_risk_level = compute_fraud_risk(
+        result,
+        scam_keyword_analysis,
+    )
     confidence = max(result["spoof_probability"], result["bonafide_probability"])
 
     return {
@@ -1740,6 +1854,10 @@ def analyze_stream_window(window):
         "recommendation": result["recommendation"],
         "voice_analysis": voice_analysis,
         "explainability": explainability,
+        "scam_keyword_analysis": scam_keyword_analysis,
+        "fraud_risk_score": fraud_risk_score,
+        "fraud_risk_level": fraud_risk_level,
+        "india_fraud_analysis": india_fraud_analysis,
     }
 
 
@@ -1823,6 +1941,49 @@ async def api_status():
     }
 
 
+@app.post("/api/fraud/classify")
+async def classify_fraud(request: TranscriptRequest):
+    return {"success": True, "analysis": classify_transcript(request.transcript)}
+
+
+@app.post("/api/registry/number")
+async def verify_number(request: RegistryNumberRequest):
+    return {"success": True, "verification": await registry_service.verify_number(request.phone_number)}
+
+
+@app.post("/api/registry/device")
+async def verify_device(request: DeviceRequest):
+    if not request.imei and not request.device_id:
+        raise HTTPException(status_code=400, detail="Provide an IMEI or device identifier.")
+    return {"success": True, "verification": await registry_service.validate_ceir_device(request.imei, request.device_id)}
+
+
+@app.post("/api/incidents")
+async def create_incident(request: IncidentRequest):
+    try:
+        payload = build_incident_payload(
+            transcript_analysis=request.transcript_analysis,
+            caller_number=request.caller_number,
+            call_started_at=request.call_started_at,
+            victim_consent=request.victim_consent,
+            active_debit=request.active_debit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    payload["incident_card"] = build_incident_card(
+        incident_id=payload["incident_id"],
+        active_debit=request.active_debit,
+        risk_level=str(request.transcript_analysis.get("level", "caution")),
+        caller_number=request.caller_number,
+    )
+    return {"success": True, "incident": payload}
+
+
+@app.post("/api/family/sos")
+async def family_sos(request: SosRequest):
+    return {"success": True, "sos": build_family_sos(**request.model_dump())}
+
+
 # ============================================================
 # REAL-TIME PCM WEBSOCKET
 # ============================================================
@@ -1844,6 +2005,7 @@ async def analyze_pcm_stream(websocket: WebSocket):
     sample_rate = TARGET_SAMPLE_RATE
     channels = 1
     encoding = "pcm_s16le"
+    transcript = None
     ring_buffer = PCMStreamRingBuffer(STREAM_WINDOW_SAMPLES)
     total_samples = 0
     next_analysis_sample = STREAM_WINDOW_SAMPLES
@@ -1862,6 +2024,7 @@ async def analyze_pcm_stream(websocket: WebSocket):
                         sample_rate = int(control.get("sample_rate", sample_rate))
                         channels = int(control.get("channels", channels))
                         encoding = control.get("encoding", encoding)
+                        transcript = control.get("transcript", transcript)
                         await websocket.send_json({
                             "success": True,
                             "type": "config_ack",
@@ -1869,6 +2032,8 @@ async def analyze_pcm_stream(websocket: WebSocket):
                             "channels": channels,
                             "encoding": encoding,
                         })
+                    elif control.get("type") == "transcript":
+                        transcript = control.get("text", "")
                     continue
                 except (json.JSONDecodeError, TypeError, ValueError) as exc:
                     await websocket.send_json({"success": False, "error": f"Invalid stream control message: {exc}"})
@@ -1889,7 +2054,10 @@ async def analyze_pcm_stream(websocket: WebSocket):
             total_samples += samples.size
 
             while total_samples >= next_analysis_sample:
-                analysis = analyze_stream_window(ring_buffer.latest(STREAM_WINDOW_SAMPLES))
+                analysis = analyze_stream_window(
+                    ring_buffer.latest(STREAM_WINDOW_SAMPLES),
+                    transcript,
+                )
                 analysis["type"] = "analysis"
                 analysis["stream_sample_end"] = next_analysis_sample
                 analysis["stream_seconds"] = round(next_analysis_sample / TARGET_SAMPLE_RATE, 3)
@@ -1906,7 +2074,8 @@ async def analyze_pcm_stream(websocket: WebSocket):
 
 @app.post("/api/analyze")
 async def analyze_audio(
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    transcript: str | None = Form(default=None),
 ):
 
     # --------------------------------------------------------
@@ -1996,6 +2165,15 @@ async def analyze_audio(
 
     explainability = compute_explainability_metadata(
         raw_audio
+    )
+    scam_keyword_analysis = compute_scam_keyword_layer(
+        transcript,
+        explainability,
+        duration,
+    )
+    fraud_risk_score, fraud_risk_level = compute_fraud_risk(
+        result,
+        scam_keyword_analysis,
     )
 
     # --------------------------------------------------------
@@ -2100,6 +2278,12 @@ async def analyze_audio(
 
         "explainability": explainability,
 
+        "scam_keyword_analysis": scam_keyword_analysis,
+
+        "fraud_risk_score": fraud_risk_score,
+
+        "fraud_risk_level": fraud_risk_level,
+
         "analysis_window_seconds": round(
             WINDOW_SECONDS,
             2
@@ -2120,7 +2304,8 @@ async def analyze_audio(
 
 @app.post("/api/analyze/live")
 async def analyze_live_audio(
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    transcript: str | None = Form(default=None),
 ):
     """Analyze a rolling recording while the caller is speaking."""
 
@@ -2146,6 +2331,15 @@ async def analyze_live_audio(
     result = run_aasist(audio)
     voice_analysis = compute_voice_presence_layer(raw_audio)
     explainability = compute_explainability_metadata(raw_audio)
+    scam_keyword_analysis = compute_scam_keyword_layer(
+        transcript,
+        explainability,
+        duration,
+    )
+    fraud_risk_score, fraud_risk_level = compute_fraud_risk(
+        result,
+        scam_keyword_analysis,
+    )
     confidence = max(
         result["spoof_probability"],
         result["bonafide_probability"],
@@ -2170,6 +2364,9 @@ async def analyze_live_audio(
         "recommendation": result["recommendation"],
         "voice_analysis": voice_analysis,
         "explainability": explainability,
+        "scam_keyword_analysis": scam_keyword_analysis,
+        "fraud_risk_score": fraud_risk_score,
+        "fraud_risk_level": fraud_risk_level,
         "analysis_window_seconds": round(WINDOW_SECONDS, 2),
         "live": True,
     }

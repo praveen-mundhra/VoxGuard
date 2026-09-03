@@ -9,6 +9,7 @@ import Footer from "./components/Footer";
 import WelcomeAuth from "./components/WelcomeAuth";
 import ProfileDashboard from "./components/ProfileDashboard";
 import LanguageAssistant from "./components/LanguageAssistant";
+import SeniorModeOverlay from "./components/SeniorModeOverlay";
 import { useState } from "react";
 
 export default function App() {
@@ -23,6 +24,7 @@ export default function App() {
   return (
     <>
       <LanguageAssistant />
+      <SeniorModeOverlay />
       <Navbar onProfileClick={() => setProfileView(true)} />
       {profileView ? (
         <ProfileDashboard records={records} onBack={() => setProfileView(false)} />
