@@ -1067,7 +1067,7 @@ def run_aasist(
 # spoof-detection model in this system, and it alone drives
 # `risk_score` / `risk_level` / `is_spoof`.
 #
-# The four "layers" below are classic, deterministic signal
+# The five "layers" below are classic, deterministic signal
 # processing measurements (no neural network) that give a
 # human analyst supporting evidence to look at alongside the
 # AASIST verdict. They are heuristic indicators, not a second
@@ -1458,7 +1458,52 @@ def compute_prosody_layer(raw_audio, sample_rate=TARGET_SAMPLE_RATE):
 
 
 # ------------------------------------------------------------
-# LAYER 4 — SPEAKER VERIFICATION
+# LAYER 4 — VOICE PRESENCE
+# ------------------------------------------------------------
+
+def compute_voice_presence_layer(raw_audio, sample_rate=TARGET_SAMPLE_RATE):
+    """Estimate how much of the sample contains an audible voice."""
+
+    audio = np.asarray(raw_audio, dtype=np.float32)
+
+    frame_len = int(sample_rate * 0.03)
+    hop_len = int(sample_rate * 0.01)
+    frames = frame_signal(audio, frame_len, hop_len)
+    frame_rms = np.sqrt(np.mean(np.square(frames), axis=1) + 1e-12)
+
+    # Use the quietest frames as a recording-specific noise floor so the
+    # percentage remains useful across microphones and input gain levels.
+    noise_floor = float(np.percentile(frame_rms, 10))
+    speech_reference = float(np.percentile(frame_rms, 60))
+    threshold = max(speech_reference * 0.35, 1e-5)
+    voiced_ratio = float(np.mean(frame_rms > threshold))
+    voice_presence_pct = _clamp(voiced_ratio * 100)
+
+    if voice_presence_pct >= 60:
+        status = "pass"
+        verdict = "Voice is present throughout most of the analyzed sample."
+    elif voice_presence_pct >= 35:
+        status = "caution"
+        verdict = "Voice is present, but the sample includes notable pauses or background audio."
+    else:
+        status = "flag"
+        verdict = "Only a small portion of the analyzed sample contains an audible voice."
+
+    return {
+        "name": "Voice Presence",
+        "score": round(voice_presence_pct, 1),
+        "status": status,
+        "voice_presence_pct": round(voice_presence_pct, 1),
+        "verdict": verdict,
+        "metrics": {
+            "voiced_frames_pct": round(voice_presence_pct, 1),
+            "noise_floor_rms": round(noise_floor, 5),
+        },
+    }
+
+
+# ------------------------------------------------------------
+# LAYER 5 — SPEAKER VERIFICATION
 # ------------------------------------------------------------
 
 def compute_speaker_layer(raw_audio, enrolled_embedding):
@@ -1675,6 +1720,10 @@ async def analyze_audio(
         audio
     )
 
+    voice_analysis = compute_voice_presence_layer(
+        raw_audio
+    )
+
     # --------------------------------------------------------
     # Confidence
     # --------------------------------------------------------
@@ -1773,6 +1822,8 @@ async def analyze_audio(
             ]
         ),
 
+        "voice_analysis": voice_analysis,
+
         "analysis_window_seconds": round(
             WINDOW_SECONDS,
             2
@@ -1784,6 +1835,65 @@ async def analyze_audio(
             "It is not definitive proof of "
             "caller identity or fraud."
         ),
+    }
+
+
+# ============================================================
+# LIVE AUDIO ANALYSIS
+# ============================================================
+
+@app.post("/api/analyze/live")
+async def analyze_live_audio(
+    file: UploadFile = File(...)
+):
+    """Analyze a rolling recording while the caller is speaking."""
+
+    if onnx_session is None:
+        raise HTTPException(
+            status_code=503,
+            detail="AASIST ONNX model is not available.",
+        )
+
+    audio_bytes = await file.read()
+
+    if not audio_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail="Live audio chunk is empty.",
+        )
+
+    audio, raw_audio, duration, original_sample_rate, rms = prepare_audio(
+        audio_bytes,
+        min_seconds=MIN_AUDIO_SECONDS,
+        max_seconds=MAX_AUDIO_SECONDS,
+    )
+    result = run_aasist(audio)
+    voice_analysis = compute_voice_presence_layer(raw_audio)
+    confidence = max(
+        result["spoof_probability"],
+        result["bonafide_probability"],
+    )
+
+    return {
+        "success": True,
+        "filename": file.filename or "live-recording.webm",
+        "audio_duration": round(duration, 2),
+        "original_sample_rate": original_sample_rate,
+        "processed_sample_rate": TARGET_SAMPLE_RATE,
+        "audio_rms": round(rms, 6),
+        "model": "AASIST ONNX",
+        "raw_logits": result["raw_logits"],
+        "is_spoof": result["is_spoof"],
+        "risk_score": result["risk_score"],
+        "risk_level": result["risk_level"],
+        "spoof_probability": result["spoof_probability"],
+        "bonafide_probability": result["bonafide_probability"],
+        "confidence": round(confidence, 2),
+        "message": result["message"],
+        "recommendation": result["recommendation"],
+        "voice_analysis": voice_analysis,
+        "analysis_window_seconds": round(WINDOW_SECONDS, 2),
+        "live": True,
     }
 
 

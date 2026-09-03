@@ -12,6 +12,7 @@ import {
 export default function LiveDemo({ onAnalysisComplete }) {
   const [recording, setRecording] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
 
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
@@ -39,6 +40,15 @@ export default function LiveDemo({ onAnalysisComplete }) {
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
+
+          setRecordingSeconds(audioChunksRef.current.length * 2.5);
+
+          if (audioChunksRef.current.length > 1) {
+            const rollingAudio = new Blob([...audioChunksRef.current], {
+              type: recorder.mimeType,
+            });
+            analyzeAudio(rollingAudio, "live-recording.webm", true);
+          }
         }
       };
 
@@ -52,7 +62,7 @@ export default function LiveDemo({ onAnalysisComplete }) {
         await analyzeAudio(audioBlob, "voice-recording.webm");
       };
 
-      recorder.start();
+      recorder.start(2500);
 
       setRecording(true);
     } catch (err) {
@@ -81,7 +91,7 @@ export default function LiveDemo({ onAnalysisComplete }) {
   /*
    * Send audio to Python backend
    */
-  const analyzeAudio = async (audioBlob, fileName = "voice-sample") => {
+  const analyzeAudio = async (audioBlob, fileName = "voice-sample", live = false) => {
     try {
       setAnalyzing(true);
       setError("");
@@ -91,11 +101,11 @@ export default function LiveDemo({ onAnalysisComplete }) {
       formData.append(
         "file",
         audioBlob,
-        "voice.webm"
+        fileName,
       );
 
       const response = await fetch(
-        "http://localhost:8000/api/analyze",
+        `http://localhost:8000/api/analyze${live ? "/live" : ""}`,
         {
           method: "POST",
           body: formData
@@ -109,13 +119,15 @@ export default function LiveDemo({ onAnalysisComplete }) {
       const data = await response.json();
 
       setResult(data);
-      onAnalysisComplete?.({
-        id: `${Date.now()}-${fileName}`,
-        fileName,
-        audioUrl: URL.createObjectURL(audioBlob),
-        createdAt: new Date().toISOString(),
-        result: data,
-      });
+      if (!live) {
+        onAnalysisComplete?.({
+          id: `${Date.now()}-${fileName}`,
+          fileName,
+          audioUrl: URL.createObjectURL(audioBlob),
+          createdAt: new Date().toISOString(),
+          result: data,
+        });
+      }
     } catch (err) {
       console.error(err);
 
@@ -135,6 +147,7 @@ export default function LiveDemo({ onAnalysisComplete }) {
     setError("");
     setRecording(false);
     setAnalyzing(false);
+    setRecordingSeconds(0);
   };
 
   /*
@@ -232,7 +245,7 @@ export default function LiveDemo({ onAnalysisComplete }) {
             {recording && (
               <p className="flex items-center gap-2 text-rose-300">
                 <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-rose-400" />
-                Recording microphone...
+                Recording microphone... {recordingSeconds}s
               </p>
             )}
 
@@ -371,6 +384,17 @@ export default function LiveDemo({ onAnalysisComplete }) {
                 title="Model confidence"
                 value={result.confidence}
               />
+
+              <Metric
+                title="Voice detected in sample"
+                value={result.voice_analysis?.voice_presence_pct}
+              />
+
+              {result.voice_analysis?.verdict && (
+                <p className="px-1 text-xs leading-relaxed text-slate-500">
+                  {result.voice_analysis.verdict}
+                </p>
+              )}
 
               {/* Recommendation */}
 
