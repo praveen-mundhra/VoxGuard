@@ -11,6 +11,7 @@ import ProfileDashboard from "./components/ProfileDashboard";
 import LanguageAssistant from "./components/LanguageAssistant";
 import SeniorModeOverlay from "./components/SeniorModeOverlay";
 import { useState } from "react";
+import './App.css';
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(false);

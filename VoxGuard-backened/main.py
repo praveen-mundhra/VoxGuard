@@ -18,6 +18,11 @@ from fraud_engine import classify_transcript
 from incidents import build_family_sos, build_incident_card, build_incident_payload
 from registry import TelecomRegistryService
 
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from api.calls import router as calls_router
+
 
 # ============================================================
 # VOXGUARD CONFIGURATION
@@ -2390,3 +2395,34 @@ if __name__ == "__main__":
 
         reload=False,
     )
+
+
+
+app = FastAPI(
+    title="VoxGuard AI Security API",
+    version="3.0.0"
+)
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
+
+app.include_router(
+    calls_router,
+    prefix="/api"
+)
+
+@app.get("/")
+def root():
+
+    return {
+        "name": "VoxGuard",
+        "version": "3.0.0",
+        "status": "online"
+    }
