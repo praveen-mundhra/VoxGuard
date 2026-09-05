@@ -1,4 +1,4 @@
-import { ChevronRight, Radio, Activity, ShieldCheck } from "lucide-react";
+import { ChevronRight, Radio, Activity } from "lucide-react";
 import Badge from "./Badge";
 import RiskGauge from "./RiskGauge";
 
@@ -6,7 +6,7 @@ export default function Hero() {
   return (
     <section
       id="dashboard"
-      className="relative mx-auto grid max-w-7xl gap-12 overflow-hidden px-5 py-20 md:grid-cols-2 md:items-center md:py-28"
+      className="relative mx-auto grid max-w-7xl gap-12 overflow-hidden px-10 py-20 md:grid-cols-2 md:items-center md:py-28"
     >
       {/* Background Ambient Glows */}
       <div className="pointer-events-none absolute -left-20 top-1/4 h-72 w-72 rounded-full bg-cyan-500/10 blur-[100px]" />
@@ -50,17 +50,17 @@ export default function Hero() {
         </div>
 
         {/* Quick Stats Grid */}
-        <div className="mt-12 grid max-w-lg grid-cols-3 gap-6 border-t border-slate-800/80 pt-8">
+        <div className="mt-10 flex max-w-lg flex-nowrap border-t border-slate-800/80 pt-8">
           {[
             ["<1s", "Near-real-time"],
             ["4-Layer", "Analysis"],
             ["10+", "Languages ready"],
           ].map(([val, label]) => (
-            <div key={val} className="group">
-              <b className="bg-gradient-to-br from-white to-slate-300 bg-clip-text text-2xl font-black text-transparent transition-colors group-hover:text-cyan-300">
+            <div key={val} className="group min-w-0 flex-1 text-center">
+              <b className="whitespace-nowrap bg-gradient-to-br from-white to-slate-300 bg-clip-text text-lg font-black text-transparent transition-colors group-hover:text-cyan-300 sm:text-2xl">
                 {val}
               </b>
-              <p className="mt-1 text-xs font-medium text-slate-400">{label}</p>
+              <p className="mt-0.5 whitespace-nowrap text-[12px] font-medium text-slate-400 sm:text-xs">{label}</p>
             </div>
           ))}
         </div>
@@ -72,7 +72,7 @@ export default function Hero() {
         {/* Panel Header */}
         <div className="mb-8 flex items-center justify-between border-b border-slate-800/80 pb-5">
           <div className="flex items-center gap-3.5">
-            <span className="relative grid h-11 w-11 place-items-center rounded-xl bg-rose-500/10 text-rose-400">
+            <span className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rose-500/10 text-rose-400">
               <Radio className="h-5 w-5 animate-pulse" />
               <span className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-ping rounded-full bg-rose-500" />
             </span>

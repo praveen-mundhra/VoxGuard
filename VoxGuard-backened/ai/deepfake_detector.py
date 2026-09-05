@@ -2,94 +2,65 @@ import os
 import numpy as np
 import onnxruntime as ort
 
+MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model", "aasist.onnx")
+AASIST_SAMPLES = 64600
 
 class DeepfakeDetector:
-
-    def __init__(self, model_path="models/aasist.onnx"):
-
+    def __init__(self, model_path=MODEL_PATH):
+        self.session = None
+        self.loaded = False
+        self.error = None
+        self.input_name = None
+        self.output_name = None
+        self.spoof_index = int(os.getenv("VOXGUARD_AASIST_SPOOF_INDEX", "0"))
         if not os.path.exists(model_path):
-            raise FileNotFoundError(
-                f"AASIST model not found: {model_path}"
-            )
+            self.error = f"AASIST model not found: {model_path}"
+            return
+        try:
+            self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+            self.input_name = self.session.get_inputs()[0].name
+            self.output_name = self.session.get_outputs()[0].name
+            self.loaded = True
+        except Exception as exc:
+            self.error = str(exc)
 
-        self.session = ort.InferenceSession(
-            model_path,
-            providers=["CPUExecutionProvider"]
-        )
+    @staticmethod
+    def prepare(audio):
+        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if not len(audio):
+            raise ValueError("Empty audio.")
+        if len(audio) >= AASIST_SAMPLES:
+            return np.ascontiguousarray(audio[:AASIST_SAMPLES])
+        reps = AASIST_SAMPLES // len(audio) + 1
+        return np.ascontiguousarray(np.tile(audio, reps)[:AASIST_SAMPLES])
 
-        self.input_name = self.session.get_inputs()[0].name
-
-    def preprocess(self, audio):
-
-        audio = np.asarray(audio, dtype=np.float32)
-
-        # mono
-        if audio.ndim > 1:
-            audio = np.mean(audio, axis=1)
-
-        # remove DC
-        audio = audio - np.mean(audio)
-
-        # normalize
-        max_value = np.max(np.abs(audio))
-
-        if max_value > 0:
-            audio = audio / max_value
-
-        # AASIST uses approximately 4 seconds
-        target_length = 64600
-
-        if len(audio) < target_length:
-
-            audio = np.pad(
-                audio,
-                (0, target_length - len(audio))
-            )
-
-        else:
-
-            audio = audio[:target_length]
-
-        return audio.astype(np.float32)
+    @staticmethod
+    def softmax(x):
+        x = np.asarray(x, dtype=np.float64).reshape(-1)
+        x -= np.max(x)
+        e = np.exp(x)
+        return e / max(np.sum(e), 1e-12)
 
     def predict(self, audio):
-
-        audio = self.preprocess(audio)
-
-        input_tensor = audio.reshape(1, -1)
-
-        output = self.session.run(
-            None,
-            {
-                self.input_name: input_tensor
-            }
-        )
-
-        logits = np.asarray(output[0])
-
-        # Convert logits to probabilities
-        exp_logits = np.exp(
-            logits - np.max(logits, axis=-1, keepdims=True)
-        )
-
-        probabilities = (
-            exp_logits /
-            np.sum(exp_logits, axis=-1, keepdims=True)
-        )
-
-        probabilities = probabilities[0]
-
-        # Depending on exported model:
-        # index 0 = spoof
-        # index 1 = bona fide
-        spoof_probability = float(probabilities[0])
-        genuine_probability = float(probabilities[1])
-
+        if not self.loaded:
+            return {"available": False, "error": self.error, "spoof_probability": None, "genuine_probability": None, "deepfake_risk": None}
+        x = self.prepare(audio).reshape(1, -1)
+        output = self.session.run([self.output_name], {self.input_name: x})[0]
+        logits = np.asarray(output).reshape(-1)
+        if len(logits) < 2:
+            raise RuntimeError(f"Expected 2 AASIST outputs, got {len(logits)}")
+        probs = self.softmax(logits[:2])
+        idx = 0 if self.spoof_index not in (0, 1) else self.spoof_index
+        spoof = float(probs[idx])
+        genuine = float(probs[1 - idx])
         return {
-            "spoof_probability": spoof_probability,
-            "genuine_probability": genuine_probability,
-            "deepfake_risk": round(
-                spoof_probability * 100,
-                2
-            )
+            "available": True,
+            "spoof_probability": round(spoof, 6),
+            "genuine_probability": round(genuine, 6),
+            "deepfake_risk": round(spoof * 100, 2),
+            "model": "AASIST",
+            "window_samples": AASIST_SAMPLES,
+            "spoof_index": idx,
         }
+
+detector = DeepfakeDetector()

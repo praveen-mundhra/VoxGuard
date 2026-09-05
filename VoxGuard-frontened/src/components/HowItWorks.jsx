@@ -1,4 +1,4 @@
-import { Activity, AlertTriangle, BrainCircuit, Mic, ArrowRight } from "lucide-react";
+import { Activity, AlertTriangle, BrainCircuit, Mic } from "lucide-react";
 import Badge from "./Badge";
 
 const layers = [
@@ -40,7 +40,7 @@ export default function HowItWorks() {
   return (
     <section id="how-it-works" className="relative mx-auto max-w-7xl px-5 py-24 overflow-hidden">
       {/* Background Decorative Gradient */}
-      <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 h-96 w-[700px] rounded-full bg-indigo-500/5 blur-[140px]" />
+      <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 h-96 w-[650px] rounded-full bg-indigo-500/5 blur-[140px]" />
 
       {/* Section Header */}
       <div className="max-w-2xl">
@@ -57,7 +57,7 @@ export default function HowItWorks() {
       </div>
 
       {/* Pipeline Process Grid */}
-      <div className="relative mt-14 grid gap-6 md:grid-cols-4">
+      <div className="relative mt-14 grid gap-3 md:grid-cols-4">
         {layers.map(({ Icon, n, title, description, glow, badgeColor }, index) => (
           <div
             key={n}

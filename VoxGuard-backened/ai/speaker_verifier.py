@@ -1,75 +1,76 @@
+import os
+import threading
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
+import torch
+from speechbrain.inference.speaker import SpeakerRecognition
 
+MODEL_SOURCE = "speechbrain/spkrec-ecapa-voxceleb"
 
 class SpeakerVerifier:
-
     def __init__(self):
-
+        self.model = None
+        self.loaded = False
+        self.error = None
         self.enrolled_embedding = None
+        self.lock = threading.Lock()
+        try:
+            self.model = SpeakerRecognition.from_hparams(
+                source=MODEL_SOURCE,
+                savedir=os.path.join(os.path.dirname(os.path.dirname(__file__)), "model", "speaker"),
+                run_opts={"device": os.getenv("VOXGUARD_SPEAKER_DEVICE", "cpu")},
+            )
+            self.loaded = True
+        except Exception as exc:
+            self.error = str(exc)
 
-    def enroll(self, embedding):
+    @staticmethod
+    def _tensor(audio):
+        x = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if not len(x):
+            raise ValueError("Empty audio.")
+        return torch.from_numpy(x).unsqueeze(0)
 
-        embedding = np.asarray(
-            embedding,
-            dtype=np.float32
-        )
+    @torch.no_grad()
+    def embedding(self, audio):
+        if not self.loaded:
+            raise RuntimeError(self.error or "Speaker model unavailable.")
+        with self.lock:
+            emb = self.model.encode_batch(self._tensor(audio))
+        emb = emb.squeeze().detach().cpu().numpy().astype(np.float32)
+        norm = np.linalg.norm(emb)
+        return emb / norm if norm > 0 else emb
 
-        norm = np.linalg.norm(embedding)
+    def enroll(self, audio):
+        emb = self.embedding(audio)
+        self.enrolled_embedding = emb
+        return {"status": "enrolled", "embedding_dimensions": int(emb.shape[-1]), "persistent": False}
 
-        if norm > 0:
-            embedding = embedding / norm
+    def clear(self):
+        self.enrolled_embedding = None
+        return {"status": "cleared"}
 
-        self.enrolled_embedding = embedding
-
-    def verify(self, live_embedding):
-
+    def verify(self, audio):
+        if not self.loaded:
+            return {"available": False, "status": "unavailable", "similarity": None, "speaker_risk": None, "error": self.error}
         if self.enrolled_embedding is None:
-
-            return {
-                "status": "not_enrolled",
-                "similarity": 0,
-                "speaker_risk": 50
-            }
-
-        live_embedding = np.asarray(
-            live_embedding,
-            dtype=np.float32
-        )
-
-        live_norm = np.linalg.norm(live_embedding)
-
-        if live_norm > 0:
-            live_embedding = live_embedding / live_norm
-
-        similarity = cosine_similarity(
-            self.enrolled_embedding.reshape(1, -1),
-            live_embedding.reshape(1, -1)
-        )[0][0]
-
-        similarity = float(
-            (similarity + 1) / 2
-        )
-
-        score = similarity * 100
-
-        if score >= 80:
-
-            status = "verified"
-            risk = 5
-
-        elif score >= 65:
-
-            status = "uncertain"
-            risk = 45
-
+            return {"available": True, "status": "not_enrolled", "similarity": None, "speaker_risk": 35}
+        live = self.embedding(audio)
+        similarity = float(np.dot(self.enrolled_embedding, live))
+        threshold = float(os.getenv("VOXGUARD_SPEAKER_THRESHOLD", "0.72"))
+        margin = float(os.getenv("VOXGUARD_SPEAKER_MARGIN", "0.10"))
+        if similarity >= threshold:
+            status, risk = "verified", 5
+        elif similarity >= threshold - margin:
+            status, risk = "uncertain", 50
         else:
-
-            status = "mismatch"
-            risk = 90
-
+            status, risk = "mismatch", 90
         return {
+            "available": True,
             "status": status,
-            "similarity": round(score, 2),
-            "speaker_risk": risk
+            "cosine_similarity": round(similarity, 4),
+            "similarity": round(max(0, min(100, similarity * 100)), 2),
+            "speaker_risk": risk,
+            "threshold": threshold,
         }
+
+speaker_verifier = SpeakerVerifier()

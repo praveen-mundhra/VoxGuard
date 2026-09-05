@@ -10,9 +10,9 @@ import {
 } from "lucide-react";
 
 export default function ProfileDashboard({ records, onBack }) {
-  const authenticCount = records.filter((record) => !record.result.is_spoof).length;
+  const authenticCount = records.filter((record) => !record.result?.is_spoof).length;
   const averageRisk = records.length
-    ? Math.round(records.reduce((total, record) => total + Number(record.result.risk_score || 0), 0) / records.length)
+    ? Math.round(records.reduce((total, record) => total + Number(record.result?.risk_score || 0), 0) / records.length)
     : 0;
 
   return (
@@ -85,7 +85,7 @@ function SummaryCard({ icon: Icon, label, value }) {
 }
 
 function RecordCard({ record }) {
-  const { result } = record;
+  const result = record.result || {};
   const isSpoof = result.is_spoof;
   const date = new Date(record.createdAt);
 

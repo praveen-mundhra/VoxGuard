@@ -1,0 +1,5 @@
+sample_rate: 16000
+window_seconds: 4
+languages: [en, hi, bn, ta, te, mr, gu, kn, ml, pa, or, ur]
+deepfake_model: AASIST
+speaker_model: ECAPA-TDNN

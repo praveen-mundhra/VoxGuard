@@ -39,8 +39,8 @@
   background: rgba(6, 10, 18, 0.88);
   border-bottom: 1px solid #172033;
 
-  backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
 }
 
 .logo-section {
@@ -137,7 +137,7 @@
 
 .main {
   width: 100%;
-  max-width: 1500px;
+  max-width: 1440px;
 
   margin: 0 auto;
 

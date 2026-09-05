@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: voxguard-backend}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: voxguard-backend}}
+  template:
+    metadata: {labels: {app: voxguard-backend}}
+    spec:
+      containers:
+      - name: backend
+        image: your-registry/voxguard-backend:latest

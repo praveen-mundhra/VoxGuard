@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: voxguard-frontend}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: voxguard-frontend}}
+  template:
+    metadata: {labels: {app: voxguard-frontend}}
+    spec:
+      containers:
+      - name: frontend
+        image: your-registry/voxguard-frontend:latest

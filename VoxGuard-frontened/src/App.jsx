@@ -10,6 +10,7 @@ import WelcomeAuth from "./components/WelcomeAuth";
 import ProfileDashboard from "./components/ProfileDashboard";
 import LanguageAssistant from "./components/LanguageAssistant";
 import SeniorModeOverlay from "./components/SeniorModeOverlay";
+import AIChatbot from "./components/AIChatbot";
 import { useState } from "react";
 import './App.css';
 
@@ -19,12 +20,13 @@ export default function App() {
   const [records, setRecords] = useState([]);
 
   if (!authenticated) {
-    return <><WelcomeAuth onAuthenticated={() => setAuthenticated(true)} /><LanguageAssistant /></>;
+    return <><WelcomeAuth onAuthenticated={() => setAuthenticated(true)} /><LanguageAssistant /><AIChatbot /></>;
   }
 
   return (
     <>
       <LanguageAssistant />
+      <AIChatbot />
       <SeniorModeOverlay />
       <Navbar onProfileClick={() => setProfileView(true)} />
       {profileView ? (
