@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 import numpy as np
-from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, Query, status
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -12,6 +12,8 @@ from ai.speaker_verifier import speaker_verifier
 from ai.scam_detector import analyze_scam
 from ai.risk_engine import risk_engine, RiskInputs
 from ai.transcriber import transcriber
+from database import SessionLocal
+from security.authentication import get_user_for_token
 
 router = APIRouter(tags=["calls"])
 MAX_UPLOAD_MB = 25
@@ -109,6 +111,18 @@ def clear_speaker():
 
 @router.websocket("/stream")
 async def stream(websocket: WebSocket):
+    token = websocket.query_params.get("token")
+    db = SessionLocal()
+    try:
+        if not token:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        get_user_for_token(token, db)
+    except HTTPException:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    finally:
+        db.close()
     await websocket.accept()
     sample_rate, encoding, channels = 48000, "float32", 1
     buffer = np.zeros(0, dtype=np.float32)

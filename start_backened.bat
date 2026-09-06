@@ -1,4 +1,4 @@
 @echo off
-cd backend
+cd /d "%~dp0VoxGuard-backened"
 call .venv\Scripts\activate
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --host 127.0.0.1 --port 8000

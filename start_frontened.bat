@@ -1,4 +1,4 @@
 @echo off
-cd frontend
+cd /d "%~dp0VoxGuard-frontened"
 npm install
-npm run dev
+npm run dev -- --host 127.0.0.1

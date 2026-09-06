@@ -71,7 +71,10 @@ export default function Technology() {
         </div>
 
         {/* Right Column: Interactive Feature Cards */}
-        <div className="grid gap-5 sm:grid-cols-2 md:col-span-7">
+        <div
+          className="grid gap-5 sm:grid-cols-2 md:col-span-7"
+          style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
+        >
           {features.map(({ Icon, title, description, tag }) => (
             <div
               key={title}

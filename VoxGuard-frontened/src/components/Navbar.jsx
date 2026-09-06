@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Menu, X, ShieldCheck, Sparkles } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Menu, Moon, Sun, X, ShieldCheck, Sparkles } from "lucide-react";
 
 const links = [
   ["Dashboard", "#dashboard"],
@@ -11,6 +11,15 @@ const links = [
 
 export default function Navbar() {
   const [open, setOpen] = useState(false);
+  const [lightMode, setLightMode] = useState(() => localStorage.getItem("voxguard-theme") === "light");
+
+  useEffect(() => {
+    const theme = lightMode ? "light" : "dark";
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("voxguard-theme", theme);
+  }, [lightMode]);
+
+  const toggleTheme = () => setLightMode((current) => !current);
 
   return (
     <header className="sticky top-0 z-50 border-b border-indigo-500/20 bg-[#0a0d14]/80 backdrop-blur-xl transition-all duration-300">
@@ -68,6 +77,17 @@ export default function Navbar() {
             <Sparkles className="h-4 w-4" />
             Live Demo
           </a>
+
+          <button
+            type="button"
+            onClick={toggleTheme}
+            aria-label={`Switch to ${lightMode ? "dark" : "light"} mode`}
+            aria-pressed={lightMode}
+            title={`Switch to ${lightMode ? "dark" : "light"} mode`}
+            className="inline-flex items-center justify-center rounded-lg border border-slate-700/80 bg-slate-900/60 p-2.5 text-slate-300 transition hover:border-cyan-400/60 hover:bg-slate-800 hover:text-cyan-300"
+          >
+            {lightMode ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
+          </button>
         </nav>
       </div>
     </header>

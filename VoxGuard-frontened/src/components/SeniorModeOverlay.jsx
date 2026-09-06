@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { BellRing, PhoneCall, ShieldAlert, Volume2, X } from "lucide-react";
+import { API_BASE } from "../config";
 
 const prompts = {
   hi: "सावधान। कोई भी व्यक्ति OTP या UPI पिन नहीं मांग सकता। कॉल बंद करें और परिवार को बताएं।",
@@ -29,7 +30,7 @@ export default function SeniorModeOverlay() {
     }
     setSosState("Preparing SOS...");
     try {
-      const response = await fetch("http://localhost:8000/api/family/sos", {
+      const response = await fetch(`${API_BASE}/api/family/sos`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

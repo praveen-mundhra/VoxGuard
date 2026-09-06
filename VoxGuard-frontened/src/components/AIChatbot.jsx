@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Bot, Check, ChevronDown, Languages, Loader2, MessageCircle,
+  Bot, Check, Languages, Loader2, MessageCircle,
   Mic, MicOff, Send, ShieldCheck, Sparkles, Volume2, VolumeX, X
 } from "lucide-react";
+import { API_BASE, authHeaders } from "../config";
 
-// 25+ Indian/regional languages. TTS/STT availability depends on the browser/OS voice pack.
 export const INDIAN_LANGUAGES = [
   ["English", "en", "en-IN"], ["हिन्दी", "hi", "hi-IN"], ["বাংলা", "bn", "bn-IN"],
   ["मराठी", "mr", "mr-IN"], ["తెలుగు", "te", "te-IN"], ["தமிழ்", "ta", "ta-IN"],
@@ -18,7 +18,6 @@ export const INDIAN_LANGUAGES = [
   ["तुलु", "tcy", "kn-IN"], ["भोजपुरी", "bho", "hi-IN"], ["हरियाणवी", "bgc", "hi-IN"]
 ];
 
-const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 const recognitionFactory = () =>
   typeof window !== "undefined" ? window.SpeechRecognition || window.webkitSpeechRecognition : null;
 
@@ -28,7 +27,7 @@ async function translateText(text, target) {
   if (!text?.trim() || target === "en") return text;
   try {
     const r = await fetch(
-      `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text.slice(0, 480))}&langpair=en|${encodeURIComponent(target)}`
+      `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text.slice(0, 480))}&langpair=en\vert{}${encodeURIComponent(target)}`
     );
     const data = await r.json();
     return data.responseData?.translatedText || text;
@@ -118,9 +117,9 @@ export default function AIChatbot() {
     setInput("");
     setBusy(true);
     try {
-      const response = await fetch(`${API}/api/chat`, {
+      const response = await fetch(`${API_BASE}/api/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({ message: text, language, system: "You are VoxGuard AI, a concise multilingual voice-security assistant. Prioritize safe anti-fraud advice. Never request OTP, PIN, password or banking credentials." })
       });
       if (!response.ok) throw new Error("chat endpoint unavailable");
@@ -128,7 +127,6 @@ export default function AIChatbot() {
       const answer = data.reply || data.response || data.message || localAssistant(text);
       setMessages((m) => [...m, { id: crypto.randomUUID(), role: "assistant", text: answer }]);
     } catch {
-      // Keeps the demo usable before the AI backend is configured.
       setMessages((m) => [...m, { id: crypto.randomUUID(), role: "assistant", text: localAssistant(text), fallback: true }]);
     } finally {
       setBusy(false);
@@ -136,62 +134,200 @@ export default function AIChatbot() {
   };
 
   return (
-    <div data-language-ui className="fixed bottom-6 left-6 z-[60] font-sans">
-      {open && (
-        <div className="mb-3 flex h-[610px] w-[360px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-3xl border border-cyan-400/20 bg-[#070d19]/95 shadow-2xl shadow-black/60 backdrop-blur-2xl sm:w-[400px]">
-          <div className="border-b border-slate-800 bg-gradient-to-r from-cyan-500/10 to-transparent px-4 py-3.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="rounded-xl border border-cyan-400/30 bg-cyan-400/10 p-2 text-cyan-300"><Bot size={19} /></div>
-                <div><p className="text-sm font-extrabold text-white">VoxGuard AI Assistant</p><p className="text-[10px] text-emerald-400">● Voice security assistant online</p></div>
+    <div data-language-ui className="fixed bottom-6 left-6 z-[60] font-sans antialiased selection:bg-cyan-500/30 selection:text-cyan-200">
+      {/* Main Chat Panel */}
+      <div
+        className={`mb-3 flex h-[620px] w-[370px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-3xl border border-cyan-500/20 bg-slate-950/80 shadow-[0_20px_50px_rgba(0,0,0,0.7),0_0_30px_rgba(6,182,212,0.15)] backdrop-blur-2xl transition-all duration-300 origin-bottom-left sm:w-[410px] ${
+          open
+            ? "scale-100 opacity-100 translate-y-0 pointer-events-auto"
+            : "scale-90 opacity-0 translate-y-4 pointer-events-none absolute bottom-12"
+        }`}
+      >
+        {/* Header */}
+        <div className="relative border-b border-slate-800/80 bg-gradient-to-b from-cyan-950/40 via-slate-900/60 to-transparent px-4 py-3.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="relative flex items-center justify-center rounded-2xl border border-cyan-400/40 bg-gradient-to-br from-cyan-500/20 to-blue-600/20 p-2.5 shadow-[0_0_15px_rgba(6,182,212,0.25)]">
+                <Bot size={20} className="text-cyan-300 transition-transform duration-300 hover:rotate-12" />
+                <span className="absolute -bottom-0.5 -right-0.5 flex h-2.5 w-2.5">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-slate-950" />
+                </span>
               </div>
-              <button onClick={() => setOpen(false)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"><X size={17} /></button>
+              <div>
+                <p className="text-sm font-black tracking-wide text-white drop-shadow-sm">VoxGuard AI</p>
+                <div className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <p className="text-[10px] font-medium text-emerald-400/90 tracking-wide uppercase">Anti-Fraud Engine Active</p>
+                </div>
+              </div>
             </div>
-            <div className="mt-3 flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-950/70 px-2.5 py-2">
-              <Languages size={14} className="text-cyan-400" />
-              <select value={language} onChange={(e) => setLanguage(e.target.value)} className="w-full bg-transparent text-xs font-semibold text-slate-200 outline-none">
-                {INDIAN_LANGUAGES.map(([name, code]) => <option key={code} value={code} className="bg-slate-900">{name}</option>)}
-              </select>
-              <span className="shrink-0 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[9px] font-bold text-emerald-400">{INDIAN_LANGUAGES.length} LANG</span>
-            </div>
+            <button
+              onClick={() => setOpen(false)}
+              className="rounded-xl border border-transparent p-1.5 text-slate-400 transition-all duration-200 hover:border-slate-700/60 hover:bg-slate-800/60 hover:text-white active:scale-95"
+            >
+              <X size={18} />
+            </button>
           </div>
 
-          <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-4">
-            {messages.map((message) => (
-              <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
-                <div className={`max-w-[88%] rounded-2xl px-3.5 py-2.5 ${message.role === "user" ? "rounded-br-md bg-cyan-500 text-slate-950" : "rounded-bl-md border border-slate-800 bg-slate-900/80 text-slate-200"}`}>
-                  <p className="text-xs leading-relaxed whitespace-pre-wrap">{message.text}</p>
-                  {message.role === "assistant" && (
-                    <div className="mt-2 flex items-center gap-2 border-t border-slate-700/60 pt-2">
-                      <button onClick={() => speak(message)} className="inline-flex items-center gap-1.5 text-[10px] font-bold text-cyan-300 hover:text-white">
-                        {speakingId === message.id ? <VolumeX size={12} /> : <Volume2 size={12} />} {speakingId === message.id ? "Stop" : "Speak"}
+          {/* Language Selector */}
+          <div className="group mt-3 flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 transition-all duration-200 hover:border-cyan-500/30 focus-within:border-cyan-400/60 focus-within:ring-1 focus-within:ring-cyan-400/30">
+            <Languages size={15} className="text-cyan-400 transition-transform group-hover:scale-110" />
+            <select
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              className="w-full cursor-pointer bg-transparent text-xs font-semibold text-slate-200 outline-none"
+            >
+              {INDIAN_LANGUAGES.map(([name, code]) => (
+                <option key={code} value={code} className="bg-slate-900 text-slate-200 font-medium">
+                  {name}
+                </option>
+              ))}
+            </select>
+            <span className="shrink-0 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-bold tracking-wider text-emerald-400">
+              {INDIAN_LANGUAGES.length} LANG
+            </span>
+          </div>
+        </div>
+
+        {/* Message Feed */}
+        <div ref={scrollRef} className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-4 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-slate-800">
+          {messages.map((message) => {
+            const isUser = message.role === "user";
+            return (
+              <div key={message.id} className={`flex ${isUser ? "justify-end" : "justify-start"} animate-in fade-in slide-in-from-bottom-2 duration-300`}>
+                <div
+                  className={`relative max-w-[86%] px-4 py-3 text-xs leading-relaxed transition-all shadow-md ${
+                    isUser
+                      ? "rounded-2xl rounded-br-sm bg-gradient-to-r from-cyan-500 to-cyan-400 font-semibold text-slate-950 shadow-cyan-500/20"
+                      : "rounded-2xl rounded-bl-sm border border-slate-800/80 bg-slate-900/90 text-slate-200 backdrop-blur-md shadow-black/40 hover:border-slate-700/80"
+                  }`}
+                >
+                  <p className="whitespace-pre-wrap">{message.text}</p>
+                  {!isUser && (
+                    <div className="mt-2.5 flex items-center justify-between border-t border-slate-800/80 pt-2">
+                      <button
+                        onClick={() => speak(message)}
+                        className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[10px] font-bold transition-all duration-200 ${
+                          speakingId === message.id
+                            ? "bg-cyan-400/20 text-cyan-300 ring-1 ring-cyan-400/30"
+                            : "text-slate-400 hover:bg-slate-800/60 hover:text-cyan-300"
+                        }`}
+                      >
+                        {speakingId === message.id ? (
+                          <>
+                            <VolumeX size={12} className="animate-pulse text-cyan-400" /> Stop
+                          </>
+                        ) : (
+                          <>
+                            <Volume2 size={12} /> Speak
+                          </>
+                        )}
                       </button>
-                      {message.fallback && <span className="text-[9px] text-slate-500">offline-safe fallback</span>}
+                      {message.fallback && (
+                        <span className="rounded bg-slate-800/80 px-1.5 py-0.5 text-[9px] font-medium text-slate-500">
+                          cached
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>
               </div>
-            ))}
-            {busy && <div className="flex items-center gap-2 px-2 text-[11px] text-cyan-300"><Loader2 size={14} className="animate-spin" /> VoxGuard AI is thinking…</div>}
-          </div>
+            );
+          })}
 
-          {voiceError && <div className="border-t border-rose-500/20 bg-rose-500/5 px-3 py-2 text-[10px] text-rose-300">{voiceError}</div>}
-          <form onSubmit={sendMessage} className="border-t border-slate-800 bg-slate-950/70 p-3">
-            <div className="flex items-end gap-2 rounded-2xl border border-slate-800 bg-slate-900/80 p-1.5 focus-within:border-cyan-400/50">
-              <textarea value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(e); } }} rows={2} placeholder={`Ask in ${selected[0]}…`} className="max-h-24 min-h-[42px] flex-1 resize-none bg-transparent px-2 py-1.5 text-xs text-white outline-none placeholder:text-slate-600" />
-              <button type="button" onClick={listening ? stopListening : startListening} className={`rounded-xl p-2.5 ${listening ? "bg-rose-500 text-white" : "bg-slate-800 text-cyan-300 hover:bg-slate-700"}`} title="Voice input">
+          {/* Typing Indicator */}
+          {busy && (
+            <div className="flex items-center gap-2.5 rounded-xl border border-slate-800/60 bg-slate-900/60 px-3 py-2 text-[11px] text-cyan-300 w-fit backdrop-blur-sm animate-pulse">
+              <Loader2 size={13} className="animate-spin text-cyan-400" />
+              <span>Analyzing threat pattern…</span>
+            </div>
+          )}
+        </div>
+
+        {/* Error Notification */}
+        {voiceError && (
+          <div className="border-t border-rose-500/20 bg-rose-950/40 px-3.5 py-2 text-[10px] font-medium text-rose-300 animate-in fade-in duration-200">
+            {voiceError}
+          </div>
+        )}
+
+        {/* Input Form */}
+        <form onSubmit={sendMessage} className="border-t border-slate-800/80 bg-slate-950/90 p-3 backdrop-blur-md">
+          <div className="flex items-end gap-2 rounded-2xl border border-slate-800/90 bg-slate-900/70 p-2 transition-all duration-200 focus-within:border-cyan-500/50 focus-within:bg-slate-900 focus-within:ring-2 focus-within:ring-cyan-500/20">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  sendMessage(e);
+                }
+              }}
+              rows={2}
+              placeholder={`Ask in ${selected[0]}…`}
+              className="max-h-24 min-h-[42px] flex-1 resize-none bg-transparent px-2 py-1 text-xs text-slate-100 outline-none placeholder:text-slate-500"
+            />
+            
+            {/* Mic Toggle Button */}
+            <div className="relative">
+              {listening && (
+                <span className="absolute -inset-1 rounded-xl bg-rose-500/40 animate-ping" />
+              )}
+              <button
+                type="button"
+                onClick={listening ? stopListening : startListening}
+                className={`relative rounded-xl p-2.5 transition-all duration-200 active:scale-95 ${
+                  listening
+                    ? "bg-rose-500 text-white shadow-lg shadow-rose-500/30"
+                    : "border border-slate-700/60 bg-slate-800/80 text-cyan-300 hover:border-cyan-400/40 hover:bg-slate-800 hover:text-white"
+                }`}
+                title="Voice input"
+              >
                 {listening ? <MicOff size={16} /> : <Mic size={16} />}
               </button>
-              <button type="submit" disabled={!input.trim() || busy} className="rounded-xl bg-cyan-500 p-2.5 text-slate-950 disabled:cursor-not-allowed disabled:opacity-30" title="Send"><Send size={16} /></button>
             </div>
-            <div className="mt-2 flex items-center justify-between text-[9px] text-slate-600"><span className="flex items-center gap-1"><ShieldCheck size={11} /> Never share OTP/PIN/password</span><span className="flex items-center gap-1"><Check size={10} /> TTS enabled</span></div>
-          </form>
-        </div>
-      )}
 
-      <button onClick={() => setOpen(!open)} className="group relative flex items-center gap-2 overflow-hidden rounded-full border border-cyan-400/40 bg-[#08101f] px-4 py-3 text-xs font-extrabold text-white shadow-xl shadow-cyan-950/40 transition hover:-translate-y-0.5 hover:border-cyan-300">
-        <span className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/10 to-transparent transition-transform duration-700 group-hover:translate-x-full" />
-        <MessageCircle size={17} className="text-cyan-300" /><span>VoxGuard AI</span><Sparkles size={13} className="text-cyan-400" />
+            {/* Send Button */}
+            <button
+              type="submit"
+              disabled={!input.trim() || busy}
+              className="rounded-xl bg-gradient-to-r from-cyan-500 to-cyan-400 p-2.5 text-slate-950 transition-all duration-200 hover:brightness-110 active:scale-95 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:brightness-100 shadow-md shadow-cyan-500/20"
+              title="Send"
+            >
+              <Send size={16} />
+            </button>
+          </div>
+
+          <div className="mt-2.5 flex items-center justify-between px-1 text-[9px] font-medium text-slate-500">
+            <span className="flex items-center gap-1 text-slate-400">
+              <ShieldCheck size={12} className="text-cyan-400" /> Never share OTP / PIN
+            </span>
+            <span className="flex items-center gap-1 text-slate-400">
+              <Check size={11} className="text-emerald-400" /> Multilingual TTS
+            </span>
+          </div>
+        </form>
+      </div>
+
+      {/* Floating Trigger Button */}
+      <button
+        onClick={() => setOpen(!open)}
+        className="group relative flex items-center gap-2.5 overflow-hidden rounded-full border border-cyan-400/30 bg-slate-900/90 px-5 py-3.5 text-xs font-black tracking-wide text-white shadow-[0_10px_30px_rgba(0,0,0,0.5),0_0_20px_rgba(6,182,212,0.2)] backdrop-blur-xl transition-all duration-300 hover:-translate-y-1 hover:border-cyan-300 hover:shadow-[0_15px_35px_rgba(0,0,0,0.6),0_0_30px_rgba(6,182,212,0.4)] active:scale-95"
+      >
+        {/* Shimmer Effect */}
+        <span className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-cyan-400/10 to-transparent transition-transform duration-1000 group-hover:translate-x-full" />
+        
+        <div className="relative flex items-center justify-center">
+          <MessageCircle size={18} className="text-cyan-400 transition-transform duration-300 group-hover:scale-110" />
+          <span className="absolute -top-1 -right-1 flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-75" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-cyan-500" />
+          </span>
+        </div>
+        
+        <span className="tracking-wider">VoxGuard AI</span>
+        <Sparkles size={14} className="text-cyan-300 transition-all duration-300 group-hover:rotate-45 group-hover:text-cyan-200" />
       </button>
     </div>
   );

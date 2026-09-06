@@ -15,12 +15,15 @@ import { useState } from "react";
 import './App.css';
 
 export default function App() {
-  const [authenticated, setAuthenticated] = useState(false);
+  const [authenticated, setAuthenticated] = useState(() => Boolean(window.localStorage.getItem("voxguard_access_token")));
   const [profileView, setProfileView] = useState(false);
   const [records, setRecords] = useState([]);
 
   if (!authenticated) {
-    return <><WelcomeAuth onAuthenticated={() => setAuthenticated(true)} /><LanguageAssistant /><AIChatbot /></>;
+    return <><WelcomeAuth onAuthenticated={(session) => {
+      window.localStorage.setItem("voxguard_access_token", session.access_token);
+      setAuthenticated(true);
+    }} /><LanguageAssistant /><AIChatbot /></>;
   }
 
   return (

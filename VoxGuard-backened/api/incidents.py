@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from database import Incident, SessionLocal
+from database import User
+from security.authorization import require_roles
 
 router = APIRouter(tags=["incidents"])
 
@@ -23,7 +25,7 @@ def create_incident(payload: IncidentCreate):
     finally: db.close()
 
 @router.get("/incidents")
-def list_incidents():
+def list_incidents(user: User = Depends(require_roles("admin", "analyst"))):
     db = SessionLocal()
     try:
         rows = db.query(Incident).order_by(Incident.id.desc()).limit(100).all()

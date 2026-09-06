@@ -2,7 +2,6 @@ import os
 import tempfile
 import threading
 import numpy as np
-from faster_whisper import WhisperModel
 from ai.audio_utils import pcm_to_wav_bytes
 
 class Transcriber:
@@ -11,17 +10,26 @@ class Transcriber:
         self.loaded = False
         self.error = None
         self.lock = threading.Lock()
-        try:
-            self.model = WhisperModel(
-                os.getenv("VOXGUARD_WHISPER_MODEL", "small"),
-                device=os.getenv("VOXGUARD_WHISPER_DEVICE", "cpu"),
-                compute_type=os.getenv("VOXGUARD_WHISPER_COMPUTE_TYPE", "int8"),
-            )
-            self.loaded = True
-        except Exception as exc:
-            self.error = str(exc)
+
+    def _ensure_loaded(self):
+        if self.loaded or self.error:
+            return
+        with self.lock:
+            if self.loaded or self.error:
+                return
+            try:
+                from faster_whisper import WhisperModel
+                self.model = WhisperModel(
+                    os.getenv("VOXGUARD_WHISPER_MODEL", "small"),
+                    device=os.getenv("VOXGUARD_WHISPER_DEVICE", "cpu"),
+                    compute_type=os.getenv("VOXGUARD_WHISPER_COMPUTE_TYPE", "int8"),
+                )
+                self.loaded = True
+            except Exception as exc:
+                self.error = str(exc)
 
     def transcribe(self, audio: np.ndarray, language=None):
+        self._ensure_loaded()
         if not self.loaded:
             return {"available": False, "text": "", "language": None, "error": self.error}
         fd, path = tempfile.mkstemp(suffix=".wav")

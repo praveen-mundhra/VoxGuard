@@ -1,23 +1,28 @@
 import os
 import numpy as np
-import onnxruntime as ort
 
 MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model", "aasist.onnx")
 AASIST_SAMPLES = 64600
 
 class DeepfakeDetector:
     def __init__(self, model_path=MODEL_PATH):
+        self.model_path = model_path
         self.session = None
         self.loaded = False
         self.error = None
         self.input_name = None
         self.output_name = None
         self.spoof_index = int(os.getenv("VOXGUARD_AASIST_SPOOF_INDEX", "0"))
-        if not os.path.exists(model_path):
-            self.error = f"AASIST model not found: {model_path}"
+
+    def _ensure_loaded(self):
+        if self.loaded or self.error:
+            return
+        if not os.path.exists(self.model_path):
+            self.error = f"AASIST model not found: {self.model_path}"
             return
         try:
-            self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+            import onnxruntime as ort
+            self.session = ort.InferenceSession(self.model_path, providers=["CPUExecutionProvider"])
             self.input_name = self.session.get_inputs()[0].name
             self.output_name = self.session.get_outputs()[0].name
             self.loaded = True
@@ -42,6 +47,7 @@ class DeepfakeDetector:
         return e / max(np.sum(e), 1e-12)
 
     def predict(self, audio):
+        self._ensure_loaded()
         if not self.loaded:
             return {"available": False, "error": self.error, "spoof_probability": None, "genuine_probability": None, "deepfake_risk": None}
         x = self.prepare(audio).reshape(1, -1)

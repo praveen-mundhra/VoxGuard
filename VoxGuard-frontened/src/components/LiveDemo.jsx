@@ -3,49 +3,124 @@ import { Activity, Play, RefreshCw, Square, ShieldAlert, CheckCircle2 } from "lu
 import Badge from "./Badge";
 import RiskGauge from "./RiskGauge";
 import VoiceUploadAnalyzer from "./VoiceUploadAnalyzer";
+import { WS_BASE } from "../config";
 
 export default function LiveDemo({ onAnalysisComplete }) {
   const [score, setScore] = useState(18);
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("Ready to analyze");
-  const timer = useRef(null);
+  const [error, setError] = useState("");
+  const socket = useRef(null);
+  const audioContext = useRef(null);
+  const microphone = useRef(null);
+  const processor = useRef(null);
+  const mediaStream = useRef(null);
 
-  useEffect(() => () => clearInterval(timer.current), []);
+  const stop = () => {
+    processor.current?.disconnect();
+    microphone.current?.disconnect();
+    mediaStream.current?.getTracks().forEach((track) => track.stop());
+    audioContext.current?.close();
+    socket.current?.close();
+    processor.current = null;
+    microphone.current = null;
+    mediaStream.current = null;
+    audioContext.current = null;
+    socket.current = null;
+    setRunning(false);
+  };
 
-  const start = () => {
-    clearInterval(timer.current);
-    setRunning(true);
-    setStatus("Analyzing live audio…");
-    let current = 18;
+  useEffect(() => () => stop(), []);
 
-    timer.current = setInterval(() => {
-      current = Math.min(92, current + Math.floor(Math.random() * 13));
-      setScore(current);
+  const start = async () => {
+    setError("");
+    setStatus("Requesting microphone access...");
 
-      if (current > 72) {
-        clearInterval(timer.current);
-        setRunning(false);
-        setStatus("High-risk synthetic voice detected");
+    if (!navigator.mediaDevices?.getUserMedia || !window.WebSocket) {
+      setError("Live microphone analysis is not supported by this browser.");
+      setStatus("Use Chrome or Edge, or upload a recording below");
+      return;
+    }
+
+    let stream;
+    let ws;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+      const context = new AudioContext();
+      const token = window.localStorage.getItem("voxguard_access_token");
+      const wsUrl = `${WS_BASE}/api/stream?token=${encodeURIComponent(token || "")}`;
+      ws = new WebSocket(wsUrl);
+      ws.binaryType = "arraybuffer";
+
+      await new Promise((resolve, reject) => {
+        ws.onopen = resolve;
+        ws.onerror = () => reject(new Error("Could not connect to the live analysis service."));
+      });
+
+      const source = context.createMediaStreamSource(stream);
+      const node = context.createScriptProcessor(4096, 1, 1);
+      const silentOutput = context.createGain();
+      silentOutput.gain.value = 0;
+      ws.send(JSON.stringify({ sample_rate: context.sampleRate, format: "float32", channels: 1 }));
+
+      ws.onmessage = (event) => {
+        const result = JSON.parse(event.data);
+        if (result.error) return setError(result.error);
+        const nextScore = Math.round(Number(result.risk?.risk_score ?? result.deepfake?.deepfake_risk ?? 0));
+        const normalized = {
+          is_spoof: Number(result.deepfake?.spoof_probability || 0) >= 0.5,
+          risk_score: nextScore,
+          confidence: Math.max(0, 100 - nextScore),
+          recommendation: result.risk?.action || "Continue monitoring and use secondary verification.",
+        };
+        setScore(Math.max(0, Math.min(100, nextScore)));
+        setStatus(result.risk?.action || (nextScore > 72 ? "High-risk voice detected" : "Live audio analyzed"));
         onAnalysisComplete?.({
           id: crypto.randomUUID(),
           createdAt: new Date().toISOString(),
-          fileName: "Live stream simulation",
-          result: {
-            is_spoof: true,
-            risk_score: current,
-            confidence: Math.max(8, 100 - current),
-            recommendation: "Do not authorize sensitive action. Trigger callback verification.",
-          },
+          fileName: "Live microphone stream",
+          result: normalized,
         });
-      }
-    }, 650);
+      };
+      ws.onclose = () => {
+        if (socket.current === ws) {
+          setRunning(false);
+          setStatus("Analysis disconnected");
+        }
+      };
+
+      node.onaudioprocess = (event) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(event.inputBuffer.getChannelData(0).slice().buffer);
+        }
+      };
+      source.connect(node);
+      node.connect(silentOutput);
+      silentOutput.connect(context.destination);
+      socket.current = ws;
+      audioContext.current = context;
+      microphone.current = source;
+      processor.current = node;
+      mediaStream.current = stream;
+      setRunning(true);
+      setStatus("Listening for live audio...");
+    } catch (err) {
+      stream?.getTracks().forEach((track) => track.stop());
+      ws?.close();
+      setError(err.message || "Microphone access failed.");
+      setStatus("Ready to analyze");
+      stop();
+    }
   };
 
   const reset = () => {
-    clearInterval(timer.current);
+    stop();
     setRunning(false);
     setScore(18);
     setStatus("Ready to analyze");
+    setError("");
   };
 
   const isHighRisk = score > 72;
@@ -66,7 +141,7 @@ export default function LiveDemo({ onAnalysisComplete }) {
           </span>
         </h2>
         <p className="mx-auto mt-4 max-w-2xl text-base leading-7 text-slate-400">
-          Simulate detection workflow in real time. VoxGuard processes audio signals and computes deepfake risk probabilities continuously.
+          Speak into your microphone and VoxGuard will continuously score deepfake, speaker, scam and transaction-risk signals.
         </p>
       </div>
 
@@ -124,11 +199,7 @@ export default function LiveDemo({ onAnalysisComplete }) {
                 </button>
               ) : (
                 <button
-                  onClick={() => {
-                    clearInterval(timer.current);
-                    setRunning(false);
-                    setStatus("Analysis paused");
-                  }}
+                  onClick={() => { stop(); setStatus("Analysis stopped"); }}
                   className="inline-flex items-center gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-6 py-3 text-sm font-bold text-rose-300 transition-all duration-300 hover:bg-rose-500/20"
                 >
                   <Square size={15} className="fill-rose-300" />
@@ -138,12 +209,13 @@ export default function LiveDemo({ onAnalysisComplete }) {
 
               <button
                 onClick={reset}
-                title="Reset simulation"
+                title="Reset analysis"
                 className="grid h-11 w-11 place-items-center rounded-xl border border-slate-700/80 bg-slate-900/60 text-slate-300 transition-all duration-300 hover:-translate-y-0.5 hover:border-slate-500 hover:text-white"
               >
                 <RefreshCw size={16} className="transition-transform duration-500 hover:rotate-180" />
               </button>
             </div>
+            {error && <p className="mt-3 max-w-sm text-center text-xs text-rose-300">{error}</p>}
           </div>
 
           {/* Right Column: Real-time Telemetry & Recommendations */}

@@ -57,7 +57,10 @@ export default function HowItWorks() {
       </div>
 
       {/* Pipeline Process Grid */}
-      <div className="relative mt-14 grid gap-3 md:grid-cols-4">
+      <div
+        className="relative mt-14 grid grid-cols-4 gap-3"
+        style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}
+      >
         {layers.map(({ Icon, n, title, description, glow, badgeColor }, index) => (
           <div
             key={n}

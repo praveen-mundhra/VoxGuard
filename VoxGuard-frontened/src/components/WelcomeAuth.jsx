@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { API_BASE } from "../config";
 import {
   ArrowRight,
   Check,
@@ -14,6 +15,8 @@ export default function WelcomeAuth({ onAuthenticated }) {
   const [mode, setMode] = useState("signup");
   const [audioFile, setAudioFile] = useState(null);
   const [audioError, setAudioError] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [busy, setBusy] = useState(false);
   const fileInputRef = useRef(null);
 
   const checkAudioLength = (file) => {
@@ -38,13 +41,31 @@ export default function WelcomeAuth({ onAuthenticated }) {
     audio.src = URL.createObjectURL(file);
   };
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault();
     if (mode === "signup" && !audioFile) {
       setAudioError("Upload a one-minute voice sample to create your profile.");
       return;
     }
-    onAuthenticated();
+    setBusy(true);
+    setAuthError("");
+    const form = new FormData(event.currentTarget);
+    try {
+      const response = await fetch(`${API_BASE}/auth/${mode === "signup" ? "register" : "login"}`, {
+        method: "POST",
+        headers: mode === "login" ? { "Content-Type": "application/x-www-form-urlencoded" } : { "Content-Type": "application/json" },
+        body: mode === "login"
+          ? new URLSearchParams({ username: form.get("email"), password: form.get("password") })
+          : JSON.stringify({ name: form.get("name"), email: form.get("email"), password: form.get("password") }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Authentication failed.");
+      onAuthenticated(data);
+    } catch (error) {
+      setAuthError(error.message || "Authentication failed.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -85,7 +106,7 @@ export default function WelcomeAuth({ onAuthenticated }) {
                 ["", "Apple", "social-apple"],
                 ["f", "Facebook", "social-facebook"],
               ].map(([icon, provider, className]) => (
-                <button key={provider} className={`social-button ${className}`} onClick={onAuthenticated} type="button">
+                    <button key={provider} className={`social-button ${className}`} onClick={() => setAuthError("Social sign-in is not configured yet. Use email and password.")} type="button">
                   <span className="social-icon">{icon}</span>
                   <span>{provider}</span>
                 </button>
@@ -94,9 +115,9 @@ export default function WelcomeAuth({ onAuthenticated }) {
           </div>
 
           <form onSubmit={handleSubmit}>
-            {mode === "signup" && <label>Full name<input type="text" placeholder="Alex Morgan" required /></label>}
-            <label>Email address<input type="email" placeholder="you@company.com" required /></label>
-            <label>Password<input type="password" placeholder="At least 8 characters" minLength="8" required /></label>
+            {mode === "signup" && <label>Full name<input name="name" type="text" placeholder="Alex Morgan" required /></label>}
+            <label>Email address<input name="email" type="email" placeholder="you@company.com" required /></label>
+            <label>Password<input name="password" type="password" placeholder="At least 8 characters" minLength="8" required /></label>
 
             {mode === "signup" && (
               <div className="voice-upload-block">
@@ -111,7 +132,8 @@ export default function WelcomeAuth({ onAuthenticated }) {
               </div>
             )}
 
-            <button className="auth-submit" type="submit">{mode === "signup" ? "Create secure profile" : "Enter VoxGuard"}<ArrowRight size={18} /></button>
+            {authError && <p className="audio-error">{authError}</p>}
+            <button className="auth-submit" type="submit" disabled={busy}>{busy ? "Securing access..." : mode === "signup" ? "Create secure profile" : "Enter VoxGuard"}<ArrowRight size={18} /></button>
           </form>
           <p className="auth-terms">By continuing, you agree to our Terms and Privacy Policy.</p>
         </div>

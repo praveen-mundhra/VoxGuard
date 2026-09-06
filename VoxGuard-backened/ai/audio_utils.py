@@ -1,13 +1,13 @@
 import io
 import wave
 import numpy as np
-import av
-from scipy.signal import resample_poly
 
 TARGET_SR = 16000
 
 
 def decode_container_audio(audio_bytes: bytes):
+    import av
+
     if not audio_bytes:
         raise ValueError("Empty audio upload.")
     container = av.open(io.BytesIO(audio_bytes))
@@ -30,6 +30,8 @@ def decode_container_audio(audio_bytes: bytes):
 
 
 def resample(audio: np.ndarray, source_sr: int, target_sr: int = TARGET_SR):
+    from scipy.signal import resample_poly
+
     audio = np.asarray(audio, dtype=np.float32).reshape(-1)
     if len(audio) == 0 or source_sr == target_sr:
         return audio

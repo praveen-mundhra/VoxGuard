@@ -7,8 +7,9 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { API_BASE, authHeaders } from "../config";
 
-const API = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+const API = API_BASE;
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const ACCEPTED_TYPES = ".wav,.mp3,.m4a,.flac,.ogg,.webm,audio/*";
 
@@ -95,6 +96,7 @@ export default function VoiceUploadAnalyzer({ onAnalysisComplete }) {
 
       const response = await fetch(`${API}/api/analyze`, {
         method: "POST",
+        headers: authHeaders(),
         body: formData,
       });
 
