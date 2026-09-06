@@ -20,7 +20,7 @@ class Transcriber:
             try:
                 from faster_whisper import WhisperModel
                 self.model = WhisperModel(
-                    os.getenv("VOXGUARD_WHISPER_MODEL", "small"),
+                    os.getenv("VOXGUARD_WHISPER_MODEL", "tiny"),
                     device=os.getenv("VOXGUARD_WHISPER_DEVICE", "cpu"),
                     compute_type=os.getenv("VOXGUARD_WHISPER_COMPUTE_TYPE", "int8"),
                 )
@@ -38,7 +38,7 @@ class Transcriber:
                 f.write(pcm_to_wav_bytes(audio))
             with self.lock:
                 segments, info = self.model.transcribe(
-                    path, beam_size=int(os.getenv("VOXGUARD_WHISPER_BEAM", "3")),
+                    path, beam_size=int(os.getenv("VOXGUARD_WHISPER_BEAM", "1")),
                     language=language, vad_filter=True,
                     condition_on_previous_text=False,
                 )
