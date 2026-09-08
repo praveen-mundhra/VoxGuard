@@ -9,7 +9,6 @@ import {
 } from "lucide-react";
 
 const MINIMUM_SECONDS = 55;
-const MAXIMUM_SECONDS = 65;
 
 export default function WelcomeAuth({ onAuthenticated }) {
   const [mode, setMode] = useState("signup");
@@ -25,9 +24,9 @@ export default function WelcomeAuth({ onAuthenticated }) {
     audio.preload = "metadata";
     audio.onloadedmetadata = () => {
       URL.revokeObjectURL(audio.src);
-      if (audio.duration < MINIMUM_SECONDS || audio.duration > MAXIMUM_SECONDS) {
+      if (audio.duration < MINIMUM_SECONDS) {
         setAudioFile(null);
-        setAudioError("Please choose a voice sample between 55 and 65 seconds.");
+        setAudioError("Please choose a voice sample that is at least 55 seconds long.");
         return;
       }
       setAudioError("");
@@ -44,7 +43,7 @@ export default function WelcomeAuth({ onAuthenticated }) {
   const handleSubmit = async (event) => {
     event.preventDefault();
     if (mode === "signup" && !audioFile) {
-      setAudioError("Upload a one-minute voice sample to create your profile.");
+      setAudioError("Upload a voice sample that is at least 55 seconds long to create your profile.");
       return;
     }
     setBusy(true);
@@ -124,8 +123,8 @@ export default function WelcomeAuth({ onAuthenticated }) {
                 <div className="voice-upload-heading"><span>VOICE BASELINE</span><b>Required</b></div>
                 <button className={`voice-dropzone ${audioFile ? "has-file" : ""}`} type="button" onClick={() => fileInputRef.current?.click()}>
                   {audioFile ? <Check size={22} /> : <Upload size={22} />}
-                  <span>{audioFile ? audioFile.name : "Upload a 1-minute voice sample"}</span>
-                  <small>{audioFile ? "Ready for secure analysis" : "WAV, MP3, M4A or WebM · 55–65 sec"}</small>
+                  <span>{audioFile ? audioFile.name : "Upload a 55+ second voice sample"}</span>
+                  <small>{audioFile ? "Ready for secure analysis" : "WAV, MP3, M4A or WebM · minimum 55 sec"}</small>
                 </button>
                 <input ref={fileInputRef} className="sr-only" type="file" accept="audio/*" onChange={(event) => checkAudioLength(event.target.files[0])} />
                 {audioError && <p className="audio-error">{audioError}</p>}

@@ -12,6 +12,7 @@ from ai.speaker_verifier import speaker_verifier
 from ai.scam_detector import analyze_scam
 from ai.risk_engine import risk_engine, RiskInputs
 from ai.transcriber import transcriber
+from app.services.voice import validate_voice_sample_duration
 from database import SessionLocal
 from security.authentication import get_user_for_token
 
@@ -48,6 +49,7 @@ def analyze_audio(audio, caller_number=None, transaction_amount=0, new_beneficia
     if len(audio) < TARGET_SR * 2:
         raise HTTPException(status_code=400, detail="At least 2 seconds of audio is required.")
     duration = len(audio) / TARGET_SR
+    validate_voice_sample_duration(duration)
     deepfake = detector.predict(audio)
     speaker = speaker_verifier.verify(audio)
     transcript = transcriber.transcribe(audio, language) if include_transcript else {"available": False, "text": "", "language": None}

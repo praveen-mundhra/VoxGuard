@@ -18,7 +18,7 @@ from app.security import clear_session, create_session, require_user
 from app.services.chat import security_chat
 from app.services.email_scanner import scan_email
 from app.services.url_scanner import scan_url
-from app.services.voice import analyze_audio
+from app.services.voice import analyze_audio, validate_voice_sample_duration
 
 
 def load_authentication_module():
@@ -229,6 +229,16 @@ async def session_voice_analyze(
     raw = await audio.read()
     if not raw or len(raw) > 25 * 1024 * 1024:
         raise HTTPException(400, "Audio is empty or exceeds 25 MB")
+    try:
+        from ai.audio_utils import decode_container_audio, TARGET_SR
+
+        decoded_audio, sample_rate = decode_container_audio(raw)
+        duration_seconds = len(decoded_audio) / sample_rate if sample_rate else len(decoded_audio) / TARGET_SR
+        validate_voice_sample_duration(duration_seconds)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(400, f"Audio sample could not be decoded: {exc}") from exc
     digest = hashlib.sha256(raw).hexdigest()
     result = analyze_audio(raw, audio.filename or "audio")
     result["sha256"] = digest

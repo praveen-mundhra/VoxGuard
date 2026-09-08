@@ -1,5 +1,14 @@
 import math, struct
 
+MINIMUM_VOICE_SAMPLE_SECONDS = 55.0
+
+
+def validate_voice_sample_duration(duration_seconds: float, minimum_seconds: float = MINIMUM_VOICE_SAMPLE_SECONDS):
+    if duration_seconds < minimum_seconds:
+        raise ValueError(f"Audio sample must be at least {minimum_seconds} seconds long.")
+    return duration_seconds
+
+
 def analyze_audio(raw: bytes, filename: str):
     # Safe baseline adapter. Replace with your trained detector in model/adapter.py.
     # This intentionally does NOT claim to detect deepfakes from bytes alone.
