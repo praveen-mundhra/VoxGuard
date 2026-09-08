@@ -23,3 +23,9 @@ sqlalchemy
 aiosqlite
 speechbrain
 SQLAlchemy
+
+slowapi
+psycopg[binary]
+reportlab
+itsdangerous
+pydantic[email]

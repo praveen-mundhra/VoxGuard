@@ -92,9 +92,9 @@ export default function VoiceUploadAnalyzer({ onAnalysisComplete }) {
 
     try {
       const formData = new FormData();
-      formData.append("file", file);
+      formData.append("audio", file);
 
-      const response = await fetch(`${API}/api/analyze`, {
+      const response = await fetch(`${API}/api/v1/voice/analyze`, {
         method: "POST",
         headers: authHeaders(),
         body: formData,

@@ -1,6 +1,11 @@
 @import "tailwindcss";
 
 :root {
+  --vg-navy: #0A192F;
+  --vg-cyan: #00F0FF;
+  --vg-green: #00FF66;
+  --vg-slate: #8892B0;
+  --vg-alert: #FF3366;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #e8edf5;
   background: #07101c;
@@ -8,7 +13,7 @@
 }
 
 :root[data-theme="light"] {
-  color: #162033;
+  color: var(--vg-navy);
   background: #f3f7fb;
   color-scheme: light;
 }
@@ -51,19 +56,19 @@ body {
 :root[data-theme="light"] [class*="text-slate-100"],
 :root[data-theme="light"] [class*="text-slate-200"],
 :root[data-theme="light"] [class*="text-slate-300"] {
-  color: #162033 !important;
+  color: var(--vg-navy) !important;
 }
 
 :root[data-theme="light"] [class*="text-slate-400"],
 :root[data-theme="light"] [class*="text-slate-500"],
 :root[data-theme="light"] [class*="text-slate-600"] {
-  color: #53647a !important;
+  color: var(--vg-slate) !important;
 }
 
 :root[data-theme="light"] [class*="border-slate-700"],
 :root[data-theme="light"] [class*="border-slate-800"],
 :root[data-theme="light"] [class*="border-slate-900"] {
-  border-color: rgba(74, 99, 128, .24) !important;
+  border-color: rgba(136, 146, 176, .45) !important;
 }
 
 :root[data-theme="light"] [class*="from-\[#0b1324"],
@@ -74,51 +79,75 @@ body {
 :root[data-theme="light"] input,
 :root[data-theme="light"] textarea,
 :root[data-theme="light"] select {
-  color: #162033 !important;
+  color: var(--vg-navy) !important;
   background-color: #ffffff !important;
-  border-color: rgba(74, 99, 128, .28) !important;
+  border-color: rgba(136, 146, 176, .55) !important;
 }
 
 :root[data-theme="light"] input::placeholder,
 :root[data-theme="light"] textarea::placeholder {
-  color: #718096;
+  color: var(--vg-slate);
 }
 
 :root[data-theme="light"] .topbar,
 :root[data-theme="light"] .header {
-  color: #162033;
+  color: var(--vg-navy);
   background: rgba(255, 255, 255, .86);
-  border-color: rgba(74, 99, 128, .2);
+  border-color: rgba(136, 146, 176, .45);
 }
 
 :root[data-theme="light"] .card,
 :root[data-theme="light"] .panel,
 :root[data-theme="light"] .control-panel {
   background: rgba(255, 255, 255, .88);
-  border-color: rgba(74, 99, 128, .2);
+  border-color: rgba(136, 146, 176, .45);
   box-shadow: 0 10px 30px rgba(43, 69, 100, .1);
 }
 
 :root[data-theme="light"] .transcript {
-  color: #334155;
+  color: var(--vg-navy);
   background: #ffffff;
-  border-color: rgba(74, 99, 128, .24);
+  border-color: rgba(136, 146, 176, .45);
 }
 
 :root[data-theme="light"] .secondary {
-  color: #162033;
+  color: var(--vg-navy);
   background: #dbe8f4;
 }
 
 :root[data-theme="light"] .glass {
   background: rgba(255, 255, 255, .78);
-  border-color: rgba(74, 99, 128, .2);
+  border-color: rgba(136, 146, 176, .45);
   box-shadow: 0 18px 50px rgba(43, 69, 100, .1);
 }
 
 :root[data-theme="light"] .auth-page {
-  color: #162033;
+  color: var(--vg-navy);
   background: #f3f7fb;
+}
+
+:root[data-theme="light"] .app {
+  color: var(--vg-navy);
+}
+
+:root[data-theme="light"] .brand p,
+:root[data-theme="light"] .status,
+:root[data-theme="light"] .hero-copy,
+:root[data-theme="light"] .risk-ring small,
+:root[data-theme="light"] .field label,
+:root[data-theme="light"] .checkbox,
+:root[data-theme="light"] .alert p,
+:root[data-theme="light"] .panel-title,
+:root[data-theme="light"] .score-top,
+:root[data-theme="light"] .metric-row,
+:root[data-theme="light"] .actions li,
+:root[data-theme="light"] .transcript small {
+  color: var(--vg-slate);
+}
+
+:root[data-theme="light"] .metric-row strong,
+:root[data-theme="light"] .score-top strong {
+  color: var(--vg-navy);
 }
 
 button, input { font: inherit; }
