@@ -31,7 +31,7 @@ export default function Navbar() {
           </span>
           <div className="flex flex-col">
             <b className="bg-gradient-to-r from-white via-slate-100 to-slate-400 bg-clip-text text-lg font-extrabold tracking-tight text-transparent">
-              VoiceGuard
+              Swaraksha
             </b>
             <span className="flex items-center gap-1.5 text-xs font-medium text-cyan-400/80">
               <span className="inline-block h-1.5 w-1.5 animate-ping rounded-full bg-cyan-400" />

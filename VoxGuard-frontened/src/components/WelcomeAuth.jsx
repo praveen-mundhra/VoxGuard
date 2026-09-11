@@ -87,7 +87,7 @@ export default function WelcomeAuth({ onAuthenticated }) {
 
         <div className="auth-panel">
           <div className="auth-panel-heading">
-            <span className="auth-panel-label">WELCOME TO VOXGUARD</span>
+            <span className="auth-panel-label">WELCOME TO SWARAKSHA</span>
             <h2>{mode === "signup" ? "Create your voice profile" : "Welcome back"}</h2>
             <p>{mode === "signup" ? "Start with a secure voice baseline." : "Sign in to your integrity dashboard."}</p>
           </div>
