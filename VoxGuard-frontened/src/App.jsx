@@ -11,13 +11,41 @@ import ProfileDashboard from "./components/ProfileDashboard";
 import LanguageAssistant from "./components/LanguageAssistant";
 import SeniorModeOverlay from "./components/SeniorModeOverlay";
 import AIChatbot from "./components/AIChatbot";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { API_BASE, authHeaders } from "./config";
 import './App.css';
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(() => Boolean(window.localStorage.getItem("voxguard_access_token")));
+  const [checkingSession, setCheckingSession] = useState(() => Boolean(window.localStorage.getItem("voxguard_access_token")));
   const [profileView, setProfileView] = useState(false);
   const [records, setRecords] = useState([]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      setCheckingSession(false);
+      return undefined;
+    }
+
+    let active = true;
+    fetch(`${API_BASE}/auth/me`, { headers: authHeaders() })
+      .then((response) => {
+        if (active && response.status === 401) {
+          window.localStorage.removeItem("voxguard_access_token");
+          setAuthenticated(false);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) setCheckingSession(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [authenticated]);
+
+  if (checkingSession) return null;
 
   if (!authenticated) {
     return <><WelcomeAuth onAuthenticated={(session) => {

@@ -106,6 +106,11 @@ export default function VoiceUploadAnalyzer({ onAnalysisComplete }) {
         : { message: await response.text() };
 
       if (!response.ok) {
+        if (response.status === 401) {
+          window.localStorage.removeItem("voxguard_access_token");
+          window.location.reload();
+          return;
+        }
         throw new Error(data?.detail || data?.message || "Voice analysis failed.");
       }
 
