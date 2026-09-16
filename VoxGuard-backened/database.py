@@ -1,9 +1,11 @@
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from sqlalchemy import create_engine, String, Float, Boolean, DateTime, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-DB_URL = os.getenv("VOXGUARD_DB", "sqlite:///./voxguard.db")
+DEFAULT_DB_PATH = Path(__file__).resolve().parent / "voxguard.db"
+DB_URL = os.getenv("VOXGUARD_DB", f"sqlite:///{DEFAULT_DB_PATH.as_posix()}")
 connect_args = {"check_same_thread": False} if DB_URL.startswith("sqlite") else {}
 engine = create_engine(DB_URL, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
