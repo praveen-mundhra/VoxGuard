@@ -12,6 +12,8 @@ import { API_BASE, authHeaders } from "../config";
 const API = API_BASE;
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const ACCEPTED_TYPES = ".wav,.mp3,.m4a,.flac,.ogg,.webm,audio/*";
+const MINIMUM_ANALYSIS_SECONDS = 5;
+
 
 function normalizeResult(data) {
   const risk = data?.risk || {};
@@ -58,21 +60,63 @@ export default function VoiceUploadAnalyzer({ onAnalysisComplete }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
-
+  
   const chooseFile = (selectedFile) => {
-    setError("");
-    setResult(null);
+  setError("");
+  setResult(null);
 
-    if (!selectedFile) return;
-    if (selectedFile.size > MAX_FILE_SIZE) {
-      setError("File is larger than 25 MB. Please choose a smaller voice sample.");
+  if (!selectedFile) return;
+
+  if (selectedFile.size > MAX_FILE_SIZE) {
+    setError(
+      "File is larger than 25 MB. Please choose a smaller voice sample."
+    );
+    return;
+  }
+
+  const objectUrl = URL.createObjectURL(selectedFile);
+  const audio = document.createElement("audio");
+
+  audio.preload = "metadata";
+
+  audio.onloadedmetadata = () => {
+    const duration = audio.duration;
+
+    URL.revokeObjectURL(objectUrl);
+
+    if (!Number.isFinite(duration)) {
+      setError("Could not determine the audio duration.");
       return;
     }
 
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    if (duration < MINIMUM_ANALYSIS_SECONDS) {
+      setFile(null);
+      setPreviewUrl("");
+      setError(
+        "Audio analysis requires at least 5 seconds of audio."
+      );
+      return;
+    }
+
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+    }
+
     setFile(selectedFile);
     setPreviewUrl(URL.createObjectURL(selectedFile));
   };
+
+  audio.onerror = () => {
+    URL.revokeObjectURL(objectUrl);
+    setFile(null);
+    setPreviewUrl("");
+    setError(
+      "That audio file could not be read. Try another recording."
+    );
+  };
+
+  audio.src = objectUrl;
+};
 
   const clearFile = () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
