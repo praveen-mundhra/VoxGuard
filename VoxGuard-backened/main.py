@@ -35,7 +35,7 @@ from app.services.voice import (
 #   POST /api/analyze
 #   POST /api/speaker/enroll
 #   DELETE /api/speaker/enroll
-#   WS   /api/stream
+#   WS   /api/calls/stream
 from app.api.calls import router as calls_router
 
 
@@ -295,7 +295,7 @@ app.add_middleware(
 # LIVE / AI CALLS ROUTER
 # ============================================================
 # IMPORTANT:
-# This registers /api/stream and the real AI audio endpoints.
+# This registers /api/calls/stream and the real AI audio endpoints.
 app.include_router(
     calls_router,
     prefix="/api",

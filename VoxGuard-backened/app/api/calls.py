@@ -20,6 +20,10 @@ from fastapi import (
 
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
+from database import SessionLocal
+
+from fastapi import WebSocket, WebSocketDisconnect
+from jose import JWTError, jwt
 
 
 # ============================================================
@@ -80,19 +84,30 @@ get_user_for_token = authentication.get_user_for_token
 # ============================================================
 
 try:
-    from app.services.audio import (
+    from app.ai.audio import (
         decode_audio_bytes,
         resample_audio,
     )
 except ImportError:
     try:
-        from app.services.audio_utils import (
+        from app.ai.audio_utils import (
             decode_audio_bytes,
             resample_audio,
         )
     except ImportError:
         decode_audio_bytes = None
         resample_audio = None
+
+try:
+    from app.ai.audio_utils import (
+        decode_float32,
+        decode_pcm16,
+        resample as resample_stream_audio,
+    )
+except ImportError:
+    decode_float32 = None
+    decode_pcm16 = None
+    resample_stream_audio = None
 
 
 try:
@@ -137,28 +152,28 @@ try:
     from app.services.deepfake_detector import detector
 except ImportError:
     try:
-        from app.services.detector import detector
+        from app.ai.detector import detector
     except ImportError:
         detector = None
 
 
 try:
-    from app.services.speaker_verifier import speaker_verifier
+    from app.ai.speaker_verifier import speaker_verifier
 except ImportError:
     speaker_verifier = None
 
 
 try:
-    from app.services.transcriber import transcriber
+    from app.ai.transcriber import transcriber
 except ImportError:
     transcriber = None
 
 
 try:
-    from app.services.scam_detector import analyze_scam
+    from app.ai.scam_detector import analyze_scam
 except ImportError:
     try:
-        from app.services.scam import analyze_scam
+        from app.ai.scam import analyze_scam
     except ImportError:
 
         def analyze_scam(transcript):
@@ -170,7 +185,7 @@ except ImportError:
 
 
 try:
-    from app.services.risk_engine import (
+    from app.ai.risk_engine import (
         RiskInputs,
         risk_engine,
     )
@@ -187,7 +202,7 @@ try:
     from database import SessionLocal
 except ImportError:
     try:
-        from app.database import SessionLocal
+        from database import SessionLocal
     except ImportError:
         SessionLocal = None
 
@@ -270,10 +285,16 @@ def clamp_score(value):
 
 def risk_level_from_score(score):
     """
-    Convert risk score into LOW / MEDIUM / HIGH.
+    Convert risk score into a display classification.
     """
 
+    if score is None:
+        return "INCONCLUSIVE"
+
     score = clamp_score(score)
+
+    if score < 10:
+        return "GENUINE"
 
     if score >= 70:
         return "HIGH"
@@ -428,41 +449,41 @@ def decode_uploaded_audio(data):
     return audio
 
 
-def prepare_stream_audio(data):
+def prepare_stream_audio(
+    data,
+    audio_format="pcm16",
+    source_sample_rate=SAMPLE_RATE,
+):
     """
-    Decode a WebSocket audio packet.
-
-    Supports raw PCM-like numpy data through the project
-    audio utility where available.
+    Decode a raw WebSocket audio packet and convert it to 16 kHz mono.
     """
 
     if not data:
         return np.array([], dtype=np.float32)
 
-    # First try project decoder.
-    if decode_audio_bytes is not None:
-        try:
-            audio = decode_audio_bytes(data)
-            audio = normalize_audio(audio)
-            return audio
-        except Exception:
-            pass
+    if audio_format == "float32":
+        if decode_float32 is None:
+            raise RuntimeError("float32 WebSocket audio decoding is unavailable.")
+        audio = decode_float32(data)
+    elif audio_format in ("pcm16", "int16"):
+        if decode_pcm16 is None:
+            raise RuntimeError("PCM16 WebSocket audio decoding is unavailable.")
+        audio = decode_pcm16(data)
+    else:
+        raise ValueError(f"Unsupported WebSocket audio format: {audio_format}")
 
-    # Fallback: interpret bytes as int16 PCM.
-    try:
-        pcm = np.frombuffer(data, dtype=np.int16)
+    audio = normalize_audio(audio)
 
-        if len(pcm) == 0:
-            return np.array([], dtype=np.float32)
-
-        audio = pcm.astype(np.float32) / 32768.0
-
-        return normalize_audio(audio)
-
-    except Exception as exc:
-        raise ValueError(
-            f"Unable to decode incoming audio: {exc}"
+    if source_sample_rate != SAMPLE_RATE:
+        if resample_stream_audio is None:
+            raise RuntimeError("WebSocket audio resampling is unavailable.")
+        audio = resample_stream_audio(
+            audio,
+            source_sample_rate,
+            SAMPLE_RATE,
         )
+
+    return audio
 
 
 # ============================================================
@@ -476,20 +497,22 @@ def run_deepfake_detection(audio):
 
     if detector is None:
         return {
-            "deepfake_risk": 0.0,
-            "spoof_probability": 0.0,
-            "genuine_probability": 1.0,
-            "label": "UNKNOWN",
+            "available": False,
+            "deepfake_risk": None,
+            "spoof_probability": None,
+            "genuine_probability": None,
+            "label": "UNAVAILABLE",
         }
 
     result = detector.predict(audio)
 
     if result is None:
         return {
-            "deepfake_risk": 0.0,
-            "spoof_probability": 0.0,
-            "genuine_probability": 1.0,
-            "label": "UNKNOWN",
+            "available": False,
+            "deepfake_risk": None,
+            "spoof_probability": None,
+            "genuine_probability": None,
+            "label": "UNAVAILABLE",
         }
 
     if isinstance(result, dict):
@@ -499,8 +522,16 @@ def run_deepfake_detection(audio):
             "score": safe_float(result),
         }
 
+    if output.get("available") is False:
+        output.setdefault("label", "UNAVAILABLE")
+        return output
+
     # Normalize common score names.
     if "spoof_probability" in output:
+        if output["spoof_probability"] is None:
+            output["available"] = False
+            output.setdefault("label", "UNAVAILABLE")
+            return output
         spoof = clamp_score(
             safe_float(output["spoof_probability"]) * 100
             if safe_float(output["spoof_probability"]) <= 1
@@ -508,9 +539,17 @@ def run_deepfake_detection(audio):
         )
 
     elif "deepfake_risk" in output:
+        if output["deepfake_risk"] is None:
+            output["available"] = False
+            output.setdefault("label", "UNAVAILABLE")
+            return output
         spoof = clamp_score(output["deepfake_risk"])
 
     elif "score" in output:
+        if output["score"] is None:
+            output["available"] = False
+            output.setdefault("label", "UNAVAILABLE")
+            return output
         raw = safe_float(output["score"])
 
         spoof = clamp_score(
@@ -518,15 +557,25 @@ def run_deepfake_detection(audio):
         )
 
     else:
-        spoof = 0.0
+        output.update({
+            "available": False,
+            "deepfake_risk": None,
+            "spoof_probability": None,
+            "genuine_probability": None,
+            "label": "UNAVAILABLE",
+        })
+        return output
 
     genuine = clamp_score(100.0 - spoof)
 
     output["spoof_probability"] = spoof / 100.0
     output["genuine_probability"] = genuine / 100.0
     output["deepfake_risk"] = spoof
+    output["available"] = True
 
-    if spoof >= 70:
+    if spoof < 10:
+        output["label"] = "GENUINE"
+    elif spoof >= 70:
         output["label"] = "SPOOF"
     elif spoof >= 40:
         output["label"] = "SUSPICIOUS"
@@ -547,9 +596,11 @@ def run_speaker_verification(audio):
 
     if speaker_verifier is None:
         return {
-            "similarity": 0.0,
-            "speaker_risk": 0.0,
+            "available": False,
+            "similarity": None,
+            "speaker_risk": None,
             "verified": False,
+            "status": "unavailable",
         }
 
     try:
@@ -563,9 +614,11 @@ def run_speaker_verification(audio):
 
     if result is None:
         return {
-            "similarity": 0.0,
-            "speaker_risk": 0.0,
+            "available": False,
+            "similarity": None,
+            "speaker_risk": None,
             "verified": False,
+            "status": "unavailable",
         }
 
     if isinstance(result, dict):
@@ -574,6 +627,27 @@ def run_speaker_verification(audio):
         output = {
             "similarity": safe_float(result),
         }
+
+    if output.get("available") is False or output.get("status") in {
+        "not_enrolled",
+        "unavailable",
+        "unconfigured",
+    }:
+        output.setdefault("available", output.get("status") != "unavailable")
+        output.setdefault("similarity", None)
+        output.setdefault("speaker_risk", None)
+        output["verified"] = False
+        return output
+
+    if output.get("similarity") is None and output.get("score") is None:
+        output.update({
+            "available": False,
+            "similarity": None,
+            "speaker_risk": None,
+            "verified": False,
+            "status": "unavailable",
+        })
+        return output
 
     similarity = safe_float(
         output.get(
@@ -587,11 +661,15 @@ def run_speaker_verification(audio):
 
     similarity = clamp_score(similarity)
 
-    speaker_risk = clamp_score(100.0 - similarity)
+    speaker_risk = output.get("speaker_risk")
+    if speaker_risk is None:
+        speaker_risk = 100.0 - similarity
+    speaker_risk = clamp_score(speaker_risk)
 
     output["similarity"] = similarity / 100.0
     output["speaker_risk"] = speaker_risk
     output["verified"] = similarity >= 70
+    output["available"] = True
 
     return output
 
@@ -650,6 +728,14 @@ def run_scam_analysis(transcript):
     else:
         text = str(transcript or "")
 
+    if not text.strip():
+        return {
+            "available": False,
+            "scam_risk": None,
+            "risk_level": "INCONCLUSIVE",
+            "matched_keywords": [],
+        }
+
     try:
         result = analyze_scam(text)
 
@@ -672,12 +758,19 @@ def run_scam_analysis(transcript):
             "scam_risk": safe_float(result),
         }
 
-    scam = safe_float(
-        output.get(
-            "scam_risk",
-            output.get("risk", 0.0),
-        )
+    raw_scam_risk = output.get(
+        "scam_risk",
+        output.get("risk"),
     )
+    if raw_scam_risk is None:
+        output.update({
+            "available": False,
+            "scam_risk": None,
+            "risk_level": "INCONCLUSIVE",
+        })
+        return output
+
+    scam = safe_float(raw_scam_risk)
 
     if scam <= 1:
         scam *= 100
@@ -685,6 +778,7 @@ def run_scam_analysis(transcript):
     scam = clamp_score(scam)
 
     output["scam_risk"] = scam
+    output["available"] = True
 
     if scam >= 70:
         output["risk_level"] = "HIGH"
@@ -706,33 +800,58 @@ def calculate_risk(
     scam,
 ):
     """
-    Combine the AI signals into a single impersonation risk.
+    Combine only available detector signals into an impersonation risk.
     """
 
-    deepfake_risk = clamp_score(
-        deepfake.get(
-            "deepfake_risk",
-            safe_float(
-                deepfake.get("spoof_probability", 0)
-            ) * 100,
-        )
-    )
+    candidates = {
+        "deepfake_risk": (
+            deepfake.get("deepfake_risk"),
+            0.30,
+            deepfake.get("available") is not False,
+        ),
+        "speaker_risk": (
+            speaker.get("speaker_risk"),
+            0.20,
+            speaker.get("available") is not False
+            and speaker.get("status") not in {
+                "not_enrolled",
+                "unavailable",
+                "unconfigured",
+            },
+        ),
+        "scam_risk": (
+            scam.get("scam_risk"),
+            0.20,
+            scam.get("available") is not False,
+        ),
+    }
+    components = {}
+    active_weight = 0.0
 
-    speaker_risk = clamp_score(
-        speaker.get(
-            "speaker_risk",
-            100
-            - (
-                safe_float(
-                    speaker.get("similarity", 0)
-                ) * 100
-            ),
-        )
-    )
+    for name, (value, weight, available) in candidates.items():
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            continue
 
-    scam_risk = clamp_score(
-        scam.get("scam_risk", 0)
-    )
+        if not available or not np.isfinite(numeric_value):
+            continue
+
+        components[name] = clamp_score(numeric_value)
+        active_weight += weight
+
+    if not components:
+        return {
+            "risk_score": None,
+            "risk_level": "INCONCLUSIVE",
+            "action": "CHECK_ANALYSIS_AVAILABILITY",
+            "available_signals": [],
+            "components": {},
+        }
+
+    deepfake_risk = components.get("deepfake_risk", 0.0)
+    speaker_risk = components.get("speaker_risk", 0.0)
+    scam_risk = components.get("scam_risk", 0.0)
 
     # If the project's dedicated risk engine exists,
     # use it first.
@@ -745,22 +864,33 @@ def calculate_risk(
                 scam_risk=scam_risk,
             )
 
-            result = risk_engine(inputs)
+            result = risk_engine.calculate(inputs)
 
             if isinstance(result, dict):
                 output = dict(result)
 
-                score = clamp_score(
-                    output.get(
-                        "risk_score",
-                        output.get("score", 0),
-                    )
+                raw_score = output.get(
+                    "risk_score",
+                    output.get("score"),
                 )
+                score = clamp_score(raw_score / active_weight)
 
                 output["risk_score"] = score
                 output["risk_level"] = risk_level_from_score(
                     score
                 )
+                output["action"] = (
+                    "STOP_AND_VERIFY"
+                    if score >= 70
+                    else "VERIFY"
+                    if score >= 40
+                    else "MONITOR"
+                )
+                output["recommendations"] = recommendations_for_risk(
+                    score
+                )
+                output["components"] = components
+                output["available_signals"] = list(components)
 
                 return output
 
@@ -773,29 +903,32 @@ def calculate_risk(
     #
     # Deepfake and speaker verification are given more
     # weight because this is an impersonation detector.
-    score = (
-        deepfake_risk * 0.50
-        + speaker_risk * 0.30
-        + scam_risk * 0.20
+    score = clamp_score(
+        (
+            deepfake_risk * 0.30
+            + speaker_risk * 0.20
+            + scam_risk * 0.20
+        )
+        / active_weight
     )
-
-    score = clamp_score(score)
 
     level = risk_level_from_score(score)
 
-    action = {
-        "HIGH": "STOP_AND_VERIFY",
-        "MEDIUM": "VERIFY",
-        "LOW": "MONITOR",
-    }[level]
+    action = (
+        "STOP_AND_VERIFY"
+        if score >= 70
+        else "VERIFY"
+        if score >= 40
+        else "MONITOR"
+    )
 
     return {
         "risk_score": score,
         "risk_level": level,
         "action": action,
-        "deepfake_risk": deepfake_risk,
-        "speaker_risk": speaker_risk,
-        "scam_risk": scam_risk,
+        "components": components,
+        "available_signals": list(components),
+        "recommendations": recommendations_for_risk(score),
     }
 
 
@@ -812,60 +945,65 @@ def build_signals(
     Convert model outputs into frontend-friendly percentages.
     """
 
-    spoof = clamp_score(
-        safe_float(
-            deepfake.get(
-                "spoof_probability",
-                0,
-            )
-        ) * 100
+    spoof_probability = deepfake.get("spoof_probability")
+    genuine_probability = deepfake.get("genuine_probability")
+    deepfake_available = (
+        deepfake.get("available") is not False
+        and spoof_probability is not None
+        and genuine_probability is not None
+    )
+    spoof = (
+        clamp_score(safe_float(spoof_probability) * 100)
+        if deepfake_available
+        else None
+    )
+    genuine = (
+        clamp_score(safe_float(genuine_probability) * 100)
+        if deepfake_available
+        else None
     )
 
-    genuine = clamp_score(
-        safe_float(
-            deepfake.get(
-                "genuine_probability",
-                1,
-            )
-        ) * 100
+    speaker_available = (
+        speaker.get("available") is not False
+        and speaker.get("status") not in {
+            "not_enrolled",
+            "unavailable",
+            "unconfigured",
+        }
+        and speaker.get("similarity") is not None
+    )
+    similarity = (
+        clamp_score(safe_float(speaker["similarity"]) * 100)
+        if speaker_available
+        else None
     )
 
-    similarity = clamp_score(
-        safe_float(
-            speaker.get(
-                "similarity",
-                0,
-            )
-        ) * 100
+    scam_risk_value = scam.get("scam_risk")
+    scam_available = (
+        scam.get("available") is not False
+        and scam_risk_value is not None
     )
-
-    speaker_risk = clamp_score(
-        speaker.get(
-            "speaker_risk",
-            100 - similarity,
-        )
-    )
-
-    scam_risk = clamp_score(
-        scam.get(
-            "scam_risk",
-            0,
-        )
+    scam_risk = (
+        clamp_score(scam_risk_value)
+        if scam_available
+        else None
     )
 
     return {
         "acoustic": genuine,
-        "spectral": clamp_score(100 - spoof),
-        "prosody": clamp_score(
-            deepfake.get(
-                "prosody_consistency",
-                genuine,
-            )
+        "spectral": clamp_score(100 - spoof) if spoof is not None else None,
+        "prosody": (
+            clamp_score(deepfake["prosody_consistency"])
+            if deepfake_available
+            and deepfake.get("prosody_consistency") is not None
+            else None
         ),
-        "speaker": similarity
-        if similarity > 0
-        else clamp_score(100 - speaker_risk),
-        "scam": clamp_score(100 - scam_risk),
+        "speaker": similarity,
+        "scam": (
+            clamp_score(100 - scam_risk)
+            if scam_risk is not None
+            else None
+        ),
     }
 
 
@@ -876,6 +1014,7 @@ def build_signals(
 def analyze_audio(
     audio,
     duration_seconds=None,
+    progress_callback=None,
 ):
     """
     Complete AI analysis pipeline.
@@ -903,32 +1042,38 @@ def analyze_audio(
     # AASIST
     # --------------------------------------------------------
 
-    print(
-        "[LIVE AI] Starting AASIST + ECAPA + Whisper + "
-        "Scam + Risk Engine"
-    )
+    print("[LIVE AI] Starting live audio analysis.")
 
+    def report_progress(stage):
+        if progress_callback is not None:
+            progress_callback(stage)
+
+    report_progress("deepfake")
     deepfake = run_deepfake_detection(audio)
 
     # --------------------------------------------------------
     # ECAPA-TDNN
     # --------------------------------------------------------
 
+    report_progress("speaker")
     speaker = run_speaker_verification(audio)
 
     # --------------------------------------------------------
     # Faster-Whisper
     # --------------------------------------------------------
 
+    report_progress("transcription")
     transcript = run_transcription(audio)
 
     # --------------------------------------------------------
     # Scam detection
     # --------------------------------------------------------
 
+    report_progress("scam")
     scam = run_scam_analysis(
         transcript
     )
+    report_progress("risk")
 
     # --------------------------------------------------------
     # Risk Engine
@@ -940,11 +1085,11 @@ def analyze_audio(
         scam,
     )
 
-    risk_score = clamp_score(
-        risk.get(
-            "risk_score",
-            0,
-        )
+    raw_risk_score = risk.get("risk_score")
+    risk_score = (
+        clamp_score(raw_risk_score)
+        if raw_risk_score is not None
+        else None
     )
 
     risk_level = risk_level_from_score(
@@ -968,8 +1113,17 @@ def analyze_audio(
     # Recommendations
     # --------------------------------------------------------
 
-    recommendations = recommendations_for_risk(
-        risk_score
+    recommendations = (
+        recommendations_for_risk(risk_score)
+        if risk_score is not None
+        else [{
+            "title": "Analysis inconclusive",
+            "description": (
+                "No live detector returned a usable signal. "
+                "Check model availability and try again."
+            ),
+            "priority": "MEDIUM",
+        }]
     )
 
     # --------------------------------------------------------
@@ -1048,26 +1202,14 @@ def analyze_audio(
 
 async def authenticate_websocket(websocket):
     """
-    Authenticate a WebSocket connection.
-
-    Token can be supplied as:
-
-        /api/stream?token=<JWT>
-
-    or:
-
-        Authorization: Bearer <JWT>
-
-    Supports both synchronous and asynchronous
-    get_user_for_token implementations.
+    Authenticate WebSocket using the same database/session
+    used by the normal HTTP authentication system.
     """
 
     token = websocket.query_params.get("token")
 
     if not token:
-        authorization = websocket.headers.get(
-            "authorization"
-        )
+        authorization = websocket.headers.get("authorization")
 
         if authorization:
             authorization = authorization.strip()
@@ -1076,56 +1218,49 @@ async def authenticate_websocket(websocket):
                 token = authorization[7:].strip()
 
     if not token:
-        print(
-            "[AUTH] WebSocket rejected: "
-            "no access token supplied."
-        )
+        print("[AUTH] WebSocket rejected: no access token supplied.")
         return None
 
+    # Remove accidental quotes
+    token = token.strip().strip('"').strip("'")
+
+    db = None
+
     try:
-        # ----------------------------------------------------
-        # Remove accidental surrounding quotes.
-        # ----------------------------------------------------
+        # IMPORTANT:
+        # get_user_for_token() requires BOTH token and db.
+        db = SessionLocal()
 
-        token = token.strip().strip('"').strip("'")
+        print("[AUTH] WebSocket token received.")
+        print(f"[AUTH] Token length: {len(token)}")
 
-        # ----------------------------------------------------
-        # Authenticate.
-        #
-        # get_user_for_token may be sync or async depending
-        # on your authentication.py implementation.
-        # ----------------------------------------------------
+        user = get_user_for_token(token, db)
 
-        result = get_user_for_token(token)
-
-        if asyncio.iscoroutine(result):
-            result = await result
-
-        # ----------------------------------------------------
-        # Authentication failed.
-        # ----------------------------------------------------
-
-        if result is None:
-            print(
-                "[AUTH] WebSocket rejected: "
-                "invalid or expired token."
-            )
+        if user is None:
+            print("[AUTH] WebSocket rejected: user not found.")
             return None
 
         print(
-            "[AUTH] WebSocket authenticated successfully."
+            f"[AUTH] WebSocket authenticated successfully. "
+            f"user_id={getattr(user, 'id', None)}"
         )
 
-        return result
+        return user
 
     except Exception as exc:
-
         print(
-            f"[AUTH] WebSocket authentication error: {exc}"
+            f"[AUTH] WebSocket authentication error: "
+            f"{type(exc).__name__}: {exc}"
         )
 
         return None
 
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 # ============================================================
 # UPLOAD ANALYSIS ENDPOINT
 # ============================================================
@@ -1365,57 +1500,50 @@ async def enroll_speaker(
 # LIVE WEBSOCKET
 # ============================================================
 
+
+# ============================================================
+# LIVE WEBSOCKET
+# ============================================================
+
 @router.websocket("/stream")
 async def live_audio_stream(
     websocket: WebSocket,
-    window: int = Query(
-        DEFAULT_STREAM_WINDOW,
-        ge=5,
-        le=30,
-    ),
-    stride: int = Query(
-        DEFAULT_STREAM_STRIDE,
-        ge=5,
-        le=30,
-    ),
 ):
+    """
+    Authenticated live voice analysis.
 
-    # ========================================================
-    # ACCEPT CONNECTION FIRST
-    # ========================================================
+    IMPORTANT:
+    This router has prefix="/calls".
+    If main.py adds prefix="/api", the endpoint is:
+        /api/calls/stream
 
+    Authenticate with the existing authentication module.
+    Preserve the existing 5-second audio analysis pipeline.
+    """
+
+    # Accept first so authentication failures can be reported
+    # as WebSocket close codes instead of an HTTP 403 handshake.
     await websocket.accept()
 
-    print(
-        "[LIVE] WebSocket connection accepted."
-    )
+    print("[LIVE] WebSocket connection accepted.")
 
-    # ========================================================
-    # AUTHENTICATE
-    # ========================================================
-
-    user = await authenticate_websocket(
-        websocket
-    )
+    # --------------------------------------------------------
+    # Authenticate with the existing login implementation
+    # --------------------------------------------------------
+    user = await authenticate_websocket(websocket)
 
     if user is None:
+        try:
+            await websocket.send_json({
+                "type": "analysis_error",
+                "code": "AUTHENTICATION_FAILED",
+                "error": "Authentication failed. Please log in again.",
+            })
+        except Exception:
+            pass
 
         try:
-            await websocket.send_json(
-                {
-                    "type": "analysis_error",
-                    "error": (
-                        "Authentication failed. "
-                        "Please log in again."
-                    ),
-                    "code": "AUTHENTICATION_FAILED",
-                }
-            )
-
-            await websocket.close(
-                code=1008
-            )
-
+            await websocket.close(code=1008)
         except Exception:
             pass
 
@@ -1423,26 +1551,19 @@ async def live_audio_stream(
 
     print(
         "[LIVE] User authenticated. "
-        "Starting live analysis."
+        f"user_id={getattr(user, 'id', None)}"
     )
 
     # --------------------------------------------------------
-    # State
+    # Configuration
     # --------------------------------------------------------
+    window = DEFAULT_STREAM_WINDOW
+    stride = DEFAULT_STREAM_STRIDE
 
-    audio_buffer = np.array(
-        [],
-        dtype=np.float32,
-    )
-
-    total_audio_seconds = 0.0
-
+    audio_buffer = np.array([], dtype=np.float32)
     window_index = 0
-
     analysis_tasks = set()
-
     send_lock = asyncio.Lock()
-
     connection_open = True
 
     semaphore = asyncio.Semaphore(
@@ -1450,19 +1571,9 @@ async def live_audio_stream(
     )
 
     # --------------------------------------------------------
-    # Safe WebSocket sender
+    # Safe sender
     # --------------------------------------------------------
-
     async def safe_send(payload):
-        """
-        Send JSON only while connection is still open.
-
-        Prevents:
-
-            Cannot call "send" once a close message
-            has been sent
-        """
-
         nonlocal connection_open
 
         if not connection_open:
@@ -1470,581 +1581,275 @@ async def live_audio_stream(
 
         try:
             async with send_lock:
-
                 if not connection_open:
                     return False
 
-                await websocket.send_json(
-                    payload
-                )
-
+                await websocket.send_json(payload)
                 return True
 
-        except (
-            WebSocketDisconnect,
-            RuntimeError,
-            ConnectionError,
-        ):
-            connection_open = False
-            return False
-
         except Exception as exc:
-            print(
-                f"[LIVE SEND] ERROR: {exc}"
-            )
-
+            print(f"[LIVE SEND] {type(exc).__name__}: {exc}")
             connection_open = False
             return False
 
     # --------------------------------------------------------
-    # Live AI worker
+    # Analyze one audio window
     # --------------------------------------------------------
-
     async def analyze_live_window(
         audio_window,
         current_index,
         current_start,
         current_end,
     ):
-        """
-        Analyze one 5-second window.
-
-        This function runs independently from the
-        WebSocket receiving loop.
-        """
-
         async with semaphore:
+            if not connection_open:
+                return
 
             started = time.perf_counter()
 
-            print(
-                f"[LIVE AI] Analyzing window "
-                f"#{current_index}"
-            )
-
-            print(
-                f"[LIVE AI] "
-                f"{current_start:.0f}s → "
-                f"{current_end:.0f}s"
-            )
-
-            # ------------------------------------------------
-            # Inform frontend that this window is being
-            # analyzed.
-            # ------------------------------------------------
-
-            await safe_send(
-                {
-                    "type": "analysis_started",
-                    "analysis_index": current_index,
-                    "window_index": current_index,
-                    "window_start_seconds": (
-                        current_start
-                    ),
-                    "window_end_seconds": (
-                        current_end
-                    ),
-                    "window_seconds": (
-                        current_end - current_start
-                    ),
-                    "status": "analyzing",
-                }
-            )
+            await safe_send({
+                "type": "analysis_started",
+                "analysis_index": current_index,
+                "window_index": current_index,
+                "window_start_seconds": current_start,
+                "window_end_seconds": current_end,
+                "window_seconds": current_end - current_start,
+                "status": "analyzing",
+            })
 
             try:
+                loop = asyncio.get_running_loop()
 
-                # --------------------------------------------
-                # Run heavy AI outside event loop.
-                # --------------------------------------------
+                def report_progress(stage):
+                    def schedule_progress():
+                        asyncio.create_task(safe_send({
+                            "type": "analysis_progress",
+                            "analysis_index": current_index,
+                            "window_index": current_index,
+                            "stage": stage,
+                        }))
+
+                    loop.call_soon_threadsafe(schedule_progress)
 
                 result = await run_in_threadpool(
                     analyze_audio,
                     audio_window,
                     current_end - current_start,
+                    report_progress,
                 )
 
-                # --------------------------------------------
-                # Normalize risk score.
-                # --------------------------------------------
-
-                risk = result.get(
-                    "risk",
-                    {},
+                risk = result.get("risk") or {}
+                raw_risk_score = risk.get(
+                    "risk_score",
+                    result.get("risk_percent"),
+                )
+                risk_score = (
+                    clamp_score(raw_risk_score)
+                    if raw_risk_score is not None
+                    else None
                 )
 
-                risk_score = clamp_score(
-                    risk.get(
-                        "risk_score",
-                        result.get(
-                            "risk_percent",
-                            0,
-                        ),
+                risk_level = risk_level_from_score(risk_score)
+
+                risk["risk_score"] = risk_score
+                risk["risk_level"] = risk_level
+
+                result["risk"] = risk
+                result["risk_percent"] = risk_score
+                result["risk_level"] = risk_level
+
+                recommendations = (
+                    result.get("recommended_actions")
+                    or (
+                        recommendations_for_risk(risk_score)
+                        if risk_score is not None
+                        else [{
+                            "title": "Analysis inconclusive",
+                            "description": (
+                                "No live detector returned a usable signal. "
+                                "Check model availability and try again."
+                            ),
+                            "priority": "MEDIUM",
+                        }]
                     )
                 )
 
-                risk_level = risk_level_from_score(
-                    risk_score
-                )
+                result["recommended_actions"] = recommendations
 
-                # --------------------------------------------
-                # Force explicit risk values.
-                #
-                # This is important because the frontend
-                # directly reads risk_percent.
-                # --------------------------------------------
+                live_status = result.get("live_status") or {}
+                live_status.update({
+                    "risk_score": risk_score,
+                    "risk_percent": risk_score,
+                    "risk_level": risk_level,
+                    "recommendations": recommendations,
+                })
+                result["live_status"] = live_status
 
-                if not isinstance(
-                    result.get("risk"),
-                    dict,
-                ):
-                    result["risk"] = {}
-
-                result["risk"]["risk_score"] = (
-                    risk_score
-                )
-
-                result["risk"]["risk_level"] = (
-                    risk_level
-                )
-
-                result["risk_percent"] = (
-                    risk_score
-                )
-
-                result["risk_level"] = (
-                    risk_level
-                )
-
-                # --------------------------------------------
-                # Recommendations
-                # --------------------------------------------
-
-                recommendations = result.get(
-                    "recommended_actions"
-                )
-
-                if not recommendations:
-                    recommendations = (
-                        recommendations_for_risk(
-                            risk_score
-                        )
-                    )
-
-                    result[
-                        "recommended_actions"
-                    ] = recommendations
-
-                # --------------------------------------------
-                # Live status
-                # --------------------------------------------
-
-                if not isinstance(
-                    result.get("live_status"),
-                    dict,
-                ):
-                    result["live_status"] = {}
-
-                result["live_status"][
-                    "risk_score"
-                ] = risk_score
-
-                result["live_status"][
-                    "risk_percent"
-                ] = risk_score
-
-                result["live_status"][
-                    "risk_level"
-                ] = risk_level
-
-                result["live_status"][
-                    "recommendations"
-                ] = recommendations
-
-                # --------------------------------------------
-                # Processing time
-                # --------------------------------------------
-
-                processing_time = round(
-                    time.perf_counter()
-                    - started,
+                telemetry = result.get("telemetry") or {}
+                telemetry["live_processing_time_seconds"] = round(
+                    time.perf_counter() - started,
                     2,
                 )
-
-                result.setdefault(
-                    "telemetry",
-                    {},
-                )
-
-                result["telemetry"][
-                    "live_processing_time_seconds"
-                ] = processing_time
-
-                # --------------------------------------------
-                # IMPORTANT PAYLOAD
-                #
-                # Frontend gets risk_percent directly.
-                # --------------------------------------------
+                result["telemetry"] = telemetry
 
                 payload = {
-                    # Keep original analysis fields.
                     **result,
-
-                    # Explicit message type.
                     "type": "analysis",
-
-                    # Also provide result object for
-                    # frontends expecting data.result.
                     "result": result,
-
-                    # Direct risk percentage.
                     "risk_percent": risk_score,
-
-                    # Direct level.
                     "risk_level": risk_level,
-
-                    # Window information.
                     "analysis_index": current_index,
                     "window_index": current_index,
-
-                    "window_start_seconds": (
-                        current_start
-                    ),
-
-                    "window_end_seconds": (
-                        current_end
-                    ),
-
-                    # Processing information.
-                    "processing_time_seconds": (
-                        processing_time
-                    ),
-
-                    # Status.
+                    "window_start_seconds": current_start,
+                    "window_end_seconds": current_end,
                     "status": "completed",
                 }
 
-                # --------------------------------------------
-                # Terminal logging.
-                # --------------------------------------------
-
+                score_label = (
+                    f"{risk_score:.2f}%"
+                    if risk_score is not None
+                    else "no score"
+                )
                 print(
-                    f"[LIVE AI] Risk: "
-                    f"{risk_score:.2f}% "
-                    f"({risk_level})"
+                    f"[LIVE AI] Window {current_index}: "
+                    f"{score_label} ({risk_level})"
                 )
 
-                print(
-                    f"[LIVE AI] Processing time: "
-                    f"{processing_time:.2f}s"
-                )
-
-                # --------------------------------------------
-                # Send result.
-                # --------------------------------------------
-
-                sent = await safe_send(
-                    payload
-                )
-
-                if sent:
-                    print(
-                        "[LIVE AI] "
-                        "Analysis sent to frontend"
-                    )
-
-                else:
-                    print(
-                        "[LIVE AI] "
-                        "Frontend disconnected before "
-                        "result could be sent."
-                    )
+                await safe_send(payload)
 
             except asyncio.CancelledError:
-                print(
-                    f"[LIVE AI] Window "
-                    f"#{current_index} cancelled."
-                )
-
                 raise
 
             except Exception as exc:
+                print(f"[LIVE AI] ERROR: {type(exc).__name__}: {exc}")
 
-                print(
-                    f"[LIVE AI] ERROR: {exc}"
-                )
-
-                await safe_send(
-                    {
-                        "type": "analysis_error",
-                        "analysis_index": current_index,
-                        "window_index": current_index,
-                        "window_start_seconds": (
-                            current_start
-                        ),
-                        "window_end_seconds": (
-                            current_end
-                        ),
-                        "error": str(exc),
-                    }
-                )
+                await safe_send({
+                    "type": "analysis_error",
+                    "analysis_index": current_index,
+                    "window_index": current_index,
+                    "error": str(exc),
+                })
 
     # --------------------------------------------------------
-    # Initial connection message
+    # Notify frontend
     # --------------------------------------------------------
-
-    await safe_send(
-        {
-            "type": "connected",
-            "message": (
-                "Live voice analysis connected."
-            ),
-            "window_seconds": window,
-            "stride_seconds": stride,
-            "minimum_analysis_seconds": (
-                LIVE_MIN_SECONDS
-            ),
-        }
-    )
+    await safe_send({
+        "type": "connected",
+        "message": "Live voice analysis connected.",
+        "window_seconds": window,
+        "stride_seconds": stride,
+        "minimum_analysis_seconds": LIVE_MIN_SECONDS,
+    })
 
     # --------------------------------------------------------
-    # Receive loop
+    # Receive audio
     # --------------------------------------------------------
+    window_samples = int(window * SAMPLE_RATE)
+    stride_samples = int(stride * SAMPLE_RATE)
+    stream_format = "pcm16"
+    stream_sample_rate = SAMPLE_RATE
 
     try:
-
         while connection_open:
+            message = await websocket.receive()
 
-            try:
-
-                message = (
-                    await websocket.receive()
-                )
-
-            except WebSocketDisconnect:
-                print(
-                    "[LIVE] "
-                    "WebSocket disconnected by client."
-                )
-
-                connection_open = False
+            if message.get("type") == "websocket.disconnect":
                 break
 
-            except RuntimeError as exc:
+            audio_bytes = message.get("bytes")
 
-                print(
-                    f"[LIVE] WebSocket receive error: "
-                    f"{exc}"
-                )
-
-                connection_open = False
-                break
-
-            # ------------------------------------------------
-            # Client disconnected
-            # ------------------------------------------------
-
-            if message.get(
-                "type"
-            ) == "websocket.disconnect":
-
-                print(
-                    "[LIVE] "
-                    "WebSocket disconnect message received."
-                )
-
-                connection_open = False
-                break
-
-            # ------------------------------------------------
-            # Binary audio
-            # ------------------------------------------------
-
-            audio_bytes = message.get(
-                "bytes"
-            )
-
+            # Handle text commands
             if audio_bytes is None:
+                text_message = message.get("text")
 
-                # --------------------------------------------
-                # Text commands
-                # --------------------------------------------
+                if not text_message:
+                    continue
 
-                text = message.get(
-                    "text"
-                )
+                try:
+                    command = json.loads(text_message)
+                except (json.JSONDecodeError, TypeError):
+                    command = {"type": text_message}
 
-                if text:
+                if "format" in command or "sample_rate" in command:
+                    requested_format = str(
+                        command.get("format", stream_format)
+                    ).lower()
+                    if requested_format not in ("float32", "pcm16", "int16"):
+                        await safe_send({
+                            "type": "analysis_error",
+                            "error": (
+                                "Unsupported audio format. "
+                                "Use float32 or pcm16."
+                            ),
+                        })
+                        continue
 
                     try:
-                        command = json.loads(
-                            text
+                        requested_sample_rate = int(
+                            command.get("sample_rate", stream_sample_rate)
                         )
+                    except (TypeError, ValueError):
+                        await safe_send({
+                            "type": "analysis_error",
+                            "error": "Invalid audio sample rate.",
+                        })
+                        continue
 
-                    except Exception:
-                        command = {
-                            "type": text
-                        }
+                    if not 8000 <= requested_sample_rate <= 192000:
+                        await safe_send({
+                            "type": "analysis_error",
+                            "error": "Audio sample rate must be between 8000 and 192000 Hz.",
+                        })
+                        continue
 
-                    command_type = command.get(
-                        "type"
-                    )
+                    stream_format = requested_format
+                    stream_sample_rate = requested_sample_rate
 
-                    if command_type in (
-                        "stop",
-                        "close",
-                        "end",
-                    ):
+                command_type = command.get("type")
 
-                        print(
-                            "[LIVE] "
-                            "Stop command received."
-                        )
+                if command_type in ("stop", "close", "end"):
+                    await safe_send({
+                        "type": "stopping",
+                        "message": "Stopping live analysis.",
+                    })
+                    break
 
-                        await safe_send(
-                            {
-                                "type": "stopping",
-                                "message": (
-                                    "Stopping live analysis."
-                                ),
-                            }
-                        )
-
-                        connection_open = False
-
-                        break
-
-                    if command_type == "ping":
-
-                        await safe_send(
-                            {
-                                "type": "pong",
-                                "timestamp": time.time(),
-                            }
-                        )
+                if command_type == "ping":
+                    await safe_send({
+                        "type": "pong",
+                        "timestamp": time.time(),
+                    })
 
                 continue
 
-            # ------------------------------------------------
-            # Decode incoming audio
-            # ------------------------------------------------
-
+            # Decode binary audio
             try:
-
                 chunk = prepare_stream_audio(
-                    audio_bytes
+                    audio_bytes,
+                    stream_format,
+                    stream_sample_rate,
                 )
-
             except Exception as exc:
-
-                print(
-                    f"[LIVE] "
-                    f"Audio decode error: {exc}"
-                )
-
-                await safe_send(
-                    {
-                        "type": "analysis_error",
-                        "error": (
-                            f"Audio decode error: {exc}"
-                        ),
-                    }
-                )
-
+                await safe_send({
+                    "type": "analysis_error",
+                    "error": f"Audio decode error: {exc}",
+                })
                 continue
 
             if len(chunk) == 0:
                 continue
 
-            # ------------------------------------------------
-            # Append to buffer
-            # ------------------------------------------------
+            audio_buffer = np.concatenate((audio_buffer, chunk))
 
-            audio_buffer = np.concatenate(
-                (
-                    audio_buffer,
-                    chunk,
-                )
-            )
-
-            # ------------------------------------------------
-            # Update duration
-            # ------------------------------------------------
-
-            total_audio_seconds = (
-                len(audio_buffer)
-                / SAMPLE_RATE
-            )
-
-            # ------------------------------------------------
-            # Create windows every 5 seconds.
-            #
-            # Example:
-            #
-            # 0 → 5
-            # 5 → 10
-            # 10 → 15
-            # 15 → 20
-            #
-            # Each window is submitted to a background
-            # analysis task.
-            # ------------------------------------------------
-
-            window_samples = int(
-                window * SAMPLE_RATE
-            )
-
-            stride_samples = int(
-                stride * SAMPLE_RATE
-            )
-
+            # Submit a task for every complete audio window
             while len(audio_buffer) >= window_samples:
+                current = audio_buffer[:window_samples].copy()
 
-                # --------------------------------------------
-                # Take exactly one window.
-                # --------------------------------------------
-
-                current = (
-                    audio_buffer[
-                        :window_samples
-                    ].copy()
-                )
-
-                # --------------------------------------------
-                # Window timestamps.
-                # --------------------------------------------
-
-                current_start = (
-                    window_index * stride
-                )
-
-                current_end = (
-                    current_start + window
-                )
-
+                current_start = window_index * stride
+                current_end = current_start + window
                 window_index += 1
 
-                # --------------------------------------------
-                # Remove exactly one stride.
-                #
-                # With window=5 and stride=5 this gives:
-                #
-                # 0-5
-                # 5-10
-                # 10-15
-                # ...
-                # --------------------------------------------
-
-                audio_buffer = (
-                    audio_buffer[
-                        stride_samples:
-                    ]
-                )
-
-                # --------------------------------------------
-                # Start background AI task.
-                #
-                # DO NOT await it here.
-                # --------------------------------------------
+                audio_buffer = audio_buffer[stride_samples:]
 
                 task = asyncio.create_task(
                     analyze_live_window(
@@ -2055,90 +1860,34 @@ async def live_audio_stream(
                     )
                 )
 
-                analysis_tasks.add(
-                    task
-                )
-
-                # Remove finished task from set.
-                task.add_done_callback(
-                    analysis_tasks.discard
-                )
+                analysis_tasks.add(task)
+                task.add_done_callback(analysis_tasks.discard)
 
     except WebSocketDisconnect:
-
-        print(
-            "[LIVE] "
-            "WebSocket disconnected."
-        )
-
-        connection_open = False
+        print("[LIVE] Client disconnected.")
 
     except asyncio.CancelledError:
-
-        print(
-            "[LIVE] "
-            "Live analysis task cancelled."
-        )
-
-        connection_open = False
+        raise
 
     except Exception as exc:
-
-        print(
-            f"[LIVE] WebSocket error: {exc}"
-        )
-
-        connection_open = False
+        print(f"[LIVE] WebSocket error: {type(exc).__name__}: {exc}")
 
     finally:
-
-        # ----------------------------------------------------
-        # Mark connection closed BEFORE cancelling tasks.
-        #
-        # This prevents background workers from attempting
-        # to send to a closed WebSocket.
-        # ----------------------------------------------------
-
         connection_open = False
 
-        # ----------------------------------------------------
-        # Cancel unfinished analysis tasks.
-        # ----------------------------------------------------
+        for task in list(analysis_tasks):
+            if not task.done():
+                task.cancel()
 
         if analysis_tasks:
-
-            print(
-                f"[LIVE] Cancelling "
-                f"{len(analysis_tasks)} "
-                f"unfinished analysis task(s)."
-            )
-
-            for task in list(
-                analysis_tasks
-            ):
-                if not task.done():
-                    task.cancel()
-
             await asyncio.gather(
                 *analysis_tasks,
                 return_exceptions=True,
             )
 
-        # ----------------------------------------------------
-        # Close socket only if required.
-        # ----------------------------------------------------
-
         try:
-
-            if websocket.client_state.name != (
-                "DISCONNECTED"
-            ):
-                await websocket.close()
-
+            await websocket.close()
         except Exception:
             pass
 
-        print(
-            "[LIVE] "
-            "Live analysis session ended."
-        )
+        print("[LIVE] Live analysis session ended.")

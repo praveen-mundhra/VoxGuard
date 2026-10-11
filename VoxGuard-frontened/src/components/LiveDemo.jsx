@@ -2,17 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
-  BrainCircuit,
   CheckCircle2,
   CircleAlert,
-  Fingerprint,
   KeyRound,
-  LockKeyhole,
   PhoneCall,
   Play,
-  RadioTower,
   RefreshCw,
-  ScanSearch,
   ShieldAlert,
   ShieldCheck,
   Square,
@@ -26,12 +21,12 @@ import { WS_BASE } from "../config";
 
 const LIVE_ANALYSIS_WINDOW_SECONDS = 5;
 
-const DEFAULT_SIGNALS = {
-  acoustic: 82,
-  spectral: 72,
-  prosody: 79,
-  speaker: 86,
-  scam: 93,
+const EMPTY_SIGNALS = {
+  acoustic: null,
+  spectral: null,
+  prosody: null,
+  speaker: null,
+  scam: null,
 };
 
 function clamp(value, min = 0, max = 100) {
@@ -41,60 +36,68 @@ function clamp(value, min = 0, max = 100) {
 }
 
 function getRiskLevel(score) {
+  if (score == null || !Number.isFinite(Number(score))) return "INCONCLUSIVE";
+  if (score < 10) return "GENUINE";
   if (score >= 75) return "HIGH";
   if (score >= 50) return "MEDIUM";
   return "LOW";
 }
 
 function getRiskSignals(result, fallbackScore = 18) {
-  const risk = clamp(
+  const riskValue =
     result?.risk?.risk_score ??
-      result?.risk_score ??
-      result?.deepfake?.deepfake_risk ??
-      fallbackScore,
-  );
+    result?.risk_score ??
+    result?.deepfake?.deepfake_risk;
+  const risk =
+    riskValue == null
+      ? fallbackScore == null
+        ? null
+        : clamp(fallbackScore)
+      : clamp(riskValue);
 
-  const spoof = clamp(Number(result?.deepfake?.spoof_probability ?? 0) * 100);
+  const deepfakeAvailable =
+    result?.deepfake?.available !== false &&
+    result?.deepfake?.spoof_probability != null &&
+    result?.deepfake?.genuine_probability != null;
+  const spoof = deepfakeAvailable
+    ? clamp(Number(result.deepfake.spoof_probability) * 100)
+    : null;
+  const genuine = deepfakeAvailable
+    ? clamp(Number(result.deepfake.genuine_probability) * 100)
+    : null;
 
-  const genuine = clamp(
-    Number(result?.deepfake?.genuine_probability ?? 0) * 100,
-  );
+  const speakerAvailable =
+    result?.speaker?.available !== false &&
+    !["not_enrolled", "unavailable", "unconfigured"].includes(
+      result?.speaker?.status,
+    ) &&
+    result?.speaker?.similarity != null;
+  const speakerSimilarity = speakerAvailable
+    ? clamp(Number(result.speaker.similarity) * 100)
+    : null;
 
-  const speakerSimilarity = clamp(
-    Number(result?.speaker?.similarity ?? 0) * 100,
-  );
-
-  const speakerRisk = clamp(result?.speaker?.speaker_risk ?? 0);
-
-  const scamRisk = clamp(result?.scam?.scam_risk ?? 0);
+  const scamAvailable =
+    result?.scam?.available !== false && result?.scam?.scam_risk != null;
+  const scamRisk = scamAvailable
+    ? clamp(result.scam.scam_risk)
+    : null;
 
   return {
     risk,
     signals: {
-      // Higher percentage means more authentic/safe for these checks.
-      acoustic:
-        genuine > 0
-          ? genuine
-          : clamp(100 - spoof, DEFAULT_SIGNALS.acoustic, 100),
-
-      // Higher percentage means fewer detected synthetic artifacts.
-      spectral: spoof > 0 ? clamp(100 - spoof) : DEFAULT_SIGNALS.spectral,
-
+      acoustic: genuine,
+      spectral: spoof == null ? null : clamp(100 - spoof),
       prosody:
-        result?.prosody_consistency != null
-          ? clamp(result.prosody_consistency)
-          : DEFAULT_SIGNALS.prosody,
-
-      speaker:
-        speakerSimilarity > 0
-          ? speakerSimilarity
-          : clamp(100 - speakerRisk, DEFAULT_SIGNALS.speaker, 100),
-
-      // Higher percentage means contextual safety.
+        deepfakeAvailable && result?.deepfake?.prosody_consistency != null
+          ? clamp(result.deepfake.prosody_consistency)
+          : null,
+      speaker: speakerSimilarity,
       scam:
-        result?.scam?.safety_score != null
-          ? clamp(result.scam.safety_score)
-          : clamp(100 - scamRisk, DEFAULT_SIGNALS.scam, 100),
+        scamRisk == null
+          ? null
+          : result.scam.safety_score != null
+            ? clamp(result.scam.safety_score)
+            : clamp(100 - scamRisk),
     },
   };
 }
@@ -218,7 +221,8 @@ function RecommendedActions({ score, mode }) {
 }
 
 function SignalBar({ label, value, icon: Icon = Activity, inverse = false }) {
-  const safeValue = clamp(value);
+  const hasValue = value != null && Number.isFinite(Number(value));
+  const safeValue = hasValue ? clamp(value) : 0;
 
   return (
     <div className="rounded-xl border border-slate-800/80 bg-slate-950/45 p-4">
@@ -229,7 +233,7 @@ function SignalBar({ label, value, icon: Icon = Activity, inverse = false }) {
         </div>
 
         <span className="shrink-0 font-mono text-sm font-bold text-cyan-300">
-          {safeValue}%
+          {hasValue ? `${safeValue}%` : "N/A"}
         </span>
       </div>
 
@@ -263,6 +267,8 @@ function StatusPanel({ score, status, running, error }) {
           ? "border-rose-500/30 bg-rose-500/10"
           : level === "MEDIUM"
             ? "border-amber-400/30 bg-amber-400/10"
+            : level === "INCONCLUSIVE"
+              ? "border-slate-500/30 bg-slate-500/10"
             : "border-emerald-400/20 bg-emerald-400/10"
       }`}
     >
@@ -271,6 +277,8 @@ function StatusPanel({ score, status, running, error }) {
           <ShieldAlert size={18} className="mt-0.5 text-rose-300" />
         ) : level === "MEDIUM" ? (
           <AlertTriangle size={18} className="mt-0.5 text-amber-300" />
+        ) : level === "INCONCLUSIVE" ? (
+          <CircleAlert size={18} className="mt-0.5 text-slate-300" />
         ) : (
           <CheckCircle2 size={18} className="mt-0.5 text-emerald-300" />
         )}
@@ -294,63 +302,63 @@ function StatusPanel({ score, status, running, error }) {
   );
 }
 
-const FRAUD_CATEGORIES = [
-  { name: "Banking & UPI Fraud", confidence: 94, severity: "CRITICAL", detail: "Credential and OTP extraction pattern", icon: KeyRound, tone: "rose" },
-  { name: "Job / Internship Scam", confidence: 31, severity: "LOW", detail: "No registration-fee language detected", icon: Activity, tone: "emerald" },
-  { name: "Lottery & Prize Bait", confidence: 18, severity: "LOW", detail: "No prize or clearance-fee language detected", icon: CircleAlert, tone: "emerald" },
-  { name: "Executive / Impersonation", confidence: 76, severity: "MEDIUM", detail: "Authority and urgency cues detected", icon: UserCheck, tone: "amber" },
-];
-
-const RISK_KEYWORDS = ["UPI PIN", "Immediate Transfer", "Processing Fee", "Debit Card Expiry"];
-
-function ExplainableCallInsights({ score, running }) {
-  const unifiedScore = clamp(Math.max(score, 78));
-  const tone = unifiedScore >= 75 ? "rose" : unifiedScore >= 50 ? "amber" : "emerald";
-  const tones = {
-    rose: { border: "border-rose-400/25", bg: "bg-rose-400/10", text: "text-rose-300", fill: "bg-rose-400" },
-    amber: { border: "border-amber-400/25", bg: "bg-amber-400/10", text: "text-amber-300", fill: "bg-amber-400" },
-    emerald: { border: "border-emerald-400/25", bg: "bg-emerald-400/10", text: "text-emerald-300", fill: "bg-emerald-400" },
-  };
+function ExplainableCallInsights({ result, score, running }) {
+  const detectedVectors = result?.scam?.detected_vectors || [];
+  const hasTranscript = Boolean(result?.transcript?.text?.trim());
+  const riskLevel = result?.risk?.risk_level || "INCONCLUSIVE";
+  const scoreText = score == null ? "Inconclusive" : `${score}% · ${riskLevel}`;
 
   return (
-    <section className="relative mt-10 overflow-hidden rounded-3xl border border-emerald-400/20 bg-slate-950/70 p-5 shadow-2xl backdrop-blur-md md:p-8">
-      <div className="pointer-events-none absolute right-0 top-0 h-56 w-56 rounded-full bg-emerald-400/5 blur-3xl" />
-      <div className="relative mb-7 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+    <section className="relative mt-10 rounded-3xl border border-slate-800 bg-slate-950/70 p-5 shadow-2xl md:p-8">
+      <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-emerald-300">
-            <span className="grid h-9 w-9 place-items-center rounded-xl border border-emerald-400/20 bg-emerald-400/10"><BrainCircuit size={18} /></span>
-            <div><p className="text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-400/80">Explainable Call Insights</p><h3 className="text-xl font-black text-white md:text-2xl">Semantic Threat &amp; Explainable Intelligence</h3></div>
-          </div>
-          <p className="mt-3 max-w-2xl text-xs leading-5 text-slate-400">Intent classification and transparent evidence layered onto Swaraksha&apos;s synthetic voice and biometric checks.</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-cyan-300">
+            Live analysis evidence
+          </p>
+          <h3 className="mt-1 text-xl font-black text-white md:text-2xl">
+            Explainable call insights
+          </h3>
         </div>
-        <div className="inline-flex w-fit items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/5 px-3 py-1.5 text-[11px] font-semibold text-emerald-300"><span className={`h-2 w-2 rounded-full ${running ? "animate-pulse bg-emerald-400" : "bg-slate-600"}`} />{running ? "SEMANTIC PIPELINE LIVE" : "MOCK CALL STATE"}</div>
+        <span className="text-sm font-bold text-cyan-200">
+          {running ? "ANALYZING" : scoreText}
+        </span>
       </div>
 
-      <div className="relative grid gap-4 xl:grid-cols-[1.25fr_1fr_0.9fr]">
-        <div className="rounded-2xl border border-slate-800/80 bg-slate-900/45 p-4 md:p-5">
-          <div className="mb-4 flex items-center justify-between"><div><h4 className="text-sm font-bold text-white">Fraud intent classification</h4><p className="mt-1 text-[11px] text-slate-500">Highest-confidence live transcription matches</p></div><ScanSearch size={17} className="text-emerald-300" /></div>
-          <div className="grid gap-2">{FRAUD_CATEGORIES.map((category) => { const Icon = category.icon; const categoryTone = tones[category.tone]; return (
-            <div key={category.name} className={`rounded-xl border p-3 ${categoryTone.border} ${categoryTone.bg}`}>
-              <div className="flex items-start gap-3"><Icon size={16} className={`mt-0.5 shrink-0 ${categoryTone.text}`} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-bold text-slate-200">{category.name}</span><span className={`rounded-full border px-2 py-0.5 text-[9px] font-bold tracking-wider ${categoryTone.border} ${categoryTone.text}`}>{category.severity}</span></div><div className="mt-2 flex items-center gap-2"><div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-800"><div className={`h-full rounded-full ${categoryTone.fill}`} style={{ width: `${category.confidence}%` }} /></div><span className={`font-mono text-[11px] font-bold ${categoryTone.text}`}>{category.confidence}%</span></div><p className="mt-1.5 text-[10px] text-slate-500">{category.detail}</p></div></div>
-            </div>
-          ); })}</div>
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+          <h4 className="text-sm font-bold text-white">Recognized speech</h4>
+          <p className="mt-2 text-xs leading-5 text-slate-300">
+            {hasTranscript
+              ? result.transcript.text
+              : result?.transcript?.available === false
+                ? "Transcription is unavailable for this window."
+                : result
+                  ? "No speech was recognized in this window."
+                  : "Speech results will appear after the first analyzed window."}
+          </p>
         </div>
 
-        <div className="rounded-2xl border border-slate-800/80 bg-slate-900/45 p-4 md:p-5">
-          <div className="mb-5 flex items-center gap-2"><Fingerprint size={17} className="text-amber-300" /><div><h4 className="text-sm font-bold text-white">XAI trigger inspector</h4><p className="mt-1 text-[11px] text-slate-500">Evidence behind the current flag</p></div></div>
-          <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">Extracted risk keywords</p>
-          <div className="flex flex-wrap gap-2">{RISK_KEYWORDS.map((keyword) => <span key={keyword} className="rounded-lg border border-amber-400/20 bg-amber-400/10 px-2.5 py-1.5 font-mono text-[10px] text-amber-200">&quot;{keyword}&quot;</span>)}</div>
-          <div className="mt-5 rounded-xl border border-rose-400/15 bg-rose-400/5 p-3"><p className="text-[10px] font-bold uppercase tracking-wider text-rose-300">Linguistic intent breakdown</p><p className="mt-2 text-xs leading-5 text-slate-300">Urgency heuristic detected combined with a financial transfer request and credential extraction language.</p></div>
-        </div>
-
-        <div className="rounded-2xl border border-slate-800/80 bg-slate-900/45 p-4 md:p-5">
-          <div className="mb-5 flex items-center gap-2"><RadioTower size={17} className="text-cyan-300" /><div><h4 className="text-sm font-bold text-white">Dual-stream fusion</h4><p className="mt-1 text-[11px] text-slate-500">Telemetry confidence by stream</p></div></div>
-          <div className="space-y-3"><div className="flex items-center justify-between gap-3 rounded-xl border border-cyan-400/15 bg-cyan-400/5 p-3"><span className="text-xs text-slate-300">Acoustic stream</span><span className="text-right font-mono text-[10px] text-cyan-300">AASIST / ECAPA-TDNN · 88%</span></div><div className="flex items-center justify-between gap-3 rounded-xl border border-amber-400/15 bg-amber-400/5 p-3"><span className="text-xs text-slate-300">Semantic stream</span><span className="text-right font-mono text-[10px] text-amber-300">Whisper NLP · 94%</span></div></div>
-          <div className="mt-6 border-t border-slate-800 pt-4"><div className="flex items-end justify-between"><span className="text-xs font-bold text-slate-300">Unified risk score</span><span className={`text-2xl font-black ${tones[tone].text}`}>{unifiedScore}%</span></div><div className="mt-2 h-3 overflow-hidden rounded-full bg-slate-800"><div className={`h-full rounded-full ${tones[tone].fill} transition-all duration-700`} style={{ width: `${unifiedScore}%` }} /></div><p className="mt-2 text-[10px] text-slate-500">Both streams agree: pause transfer and verify independently.</p></div>
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+          <h4 className="text-sm font-bold text-white">Detected scam indicators</h4>
+          {detectedVectors.length > 0 ? (
+            <ul className="mt-2 space-y-2 text-xs text-amber-200">
+              {detectedVectors.map((vector) => (
+                <li key={vector.category}>
+                  {vector.category}: {(vector.matches || []).join(", ")}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-2 text-xs leading-5 text-slate-300">
+              {result?.scam?.available === false
+                ? "Scam language could not be assessed because no transcript was available."
+                : result
+                  ? "No scam indicators were detected in the recognized speech."
+                  : "Scam analysis results will appear after the first analyzed window."}
+            </p>
+          )}
         </div>
       </div>
-
-      <div className="relative mt-4 flex items-start gap-3 rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-4"><LockKeyhole size={18} className="mt-0.5 shrink-0 text-emerald-300" /><div><p className="text-xs font-bold text-emerald-200">Zero-storage · ephemeral processing</p><p className="mt-1 text-[11px] leading-5 text-slate-400">Live audio and intermediate transcripts stay in memory only, then are deleted immediately when the call ends. Zero disk retention. Zero call-log persistence.</p></div></div>
     </section>
   );
 }
@@ -359,8 +367,8 @@ export default function LiveDemo({ onAnalysisComplete }) {
   // -----------------------------
   // Live analysis state
   // -----------------------------
-  const [liveScore, setLiveScore] = useState(18);
-  const [liveSignals, setLiveSignals] = useState(DEFAULT_SIGNALS);
+  const [liveScore, setLiveScore] = useState(null);
+  const [liveSignals, setLiveSignals] = useState(EMPTY_SIGNALS);
   const [running, setRunning] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [status, setStatus] = useState("Ready to analyze");
@@ -369,6 +377,7 @@ export default function LiveDemo({ onAnalysisComplete }) {
   const [liveWindowIndex, setLiveWindowIndex] = useState(0);
   const [liveWindowRange, setLiveWindowRange] = useState("Waiting for first 5-second analysis");
   const [liveRiskUpdatedAt, setLiveRiskUpdatedAt] = useState(null);
+  const [latestLiveResult, setLatestLiveResult] = useState(null);
 
   // -----------------------------
   // Audio sample state
@@ -456,9 +465,10 @@ export default function LiveDemo({ onAnalysisComplete }) {
         throw new Error("Please log in before starting Live Analysis.");
       }
 
-      const wsUrl = `${WS_BASE}/api/stream?token=` + encodeURIComponent(token);
+      const wsUrl =
+        `${WS_BASE}/api/calls/stream?token=` + encodeURIComponent(token);
 
-      console.log("[Swaraksha] Connecting to:", wsUrl);
+      console.log("[Swaraksha] Connecting to live analysis WebSocket");
 
       ws = new WebSocket(wsUrl);
       ws.binaryType = "arraybuffer";
@@ -490,7 +500,7 @@ export default function LiveDemo({ onAnalysisComplete }) {
         console.error("[Swaraksha] WebSocket error:", event);
 
         setError(
-          "Could not connect to the live analysis service. Check the FastAPI backend and /api/stream endpoint.",
+          "Could not connect to the live analysis service. Check the FastAPI backend and /api/calls/stream endpoint.",
         );
       };
 
@@ -515,10 +525,32 @@ export default function LiveDemo({ onAnalysisComplete }) {
         try {
           const data = JSON.parse(event.data);
 
+          if (data.type === "connected") {
+            setError("");
+            setStatus("Connected — waiting for the first audio window...");
+            return;
+          }
+
+          if (data.type === "analysis_progress") {
+            const stageLabels = {
+              deepfake: "Checking synthetic voice signals...",
+              speaker: "Checking speaker identity...",
+              transcription: "Transcribing speech...",
+              scam: "Checking for scam language...",
+              risk: "Calculating risk...",
+            };
+            setStatus(
+              stageLabels[data.stage] || "Analyzing the current audio window...",
+            );
+            setIsAnalyzing(true);
+            return;
+          }
+
           // --------------------------------
           // 5-second analysis started
           // --------------------------------
           if (data.type === "analysis_started") {
+            setError("");
             const index = Number(data.window_index || 0);
             const startSeconds = Number(data.window_start_seconds || 0);
             const endSeconds = Number(data.window_end_seconds || 5);
@@ -551,6 +583,9 @@ export default function LiveDemo({ onAnalysisComplete }) {
                 ? data.result
                 : data;
 
+            setError("");
+            setLatestLiveResult(result);
+
             const parsed = getRiskSignals(result, liveScore);
 
             // Prefer the explicit backend risk_percent field.
@@ -562,13 +597,28 @@ export default function LiveDemo({ onAnalysisComplete }) {
                 result?.risk_score,
             );
 
-            const displayRisk = Number.isFinite(backendRisk)
+            const rawRisk =
+              data.risk_percent ??
+              result?.risk?.risk_score ??
+              result?.risk_score;
+            const displayRisk = rawRisk != null && Number.isFinite(backendRisk)
               ? Math.max(0, Math.min(100, backendRisk))
               : parsed.risk;
 
-            setLiveScore(Math.round(displayRisk));
+            setLiveScore(
+              displayRisk == null ? null : Math.round(displayRisk),
+            );
             setLiveSignals(parsed.signals);
             setLiveAnalysisReceived(true);
+            const analysisLevel =
+              result?.risk?.risk_level || data.risk_level || "INCONCLUSIVE";
+            setStatus(
+              displayRisk == null
+                ? "Analysis inconclusive — no detector returned a usable signal"
+                : displayRisk < 10
+                  ? `GENUINE — ${Math.round(displayRisk)}% impersonation risk`
+                  : `Live analysis updated — ${analysisLevel} risk`,
+            );
 
             if (data.window_index != null) {
               setLiveWindowIndex(Number(data.window_index));
@@ -670,9 +720,10 @@ export default function LiveDemo({ onAnalysisComplete }) {
 
   const resetLive = () => {
     stop();
-    setLiveScore(18);
-    setLiveSignals(DEFAULT_SIGNALS);
+    setLiveScore(null);
+    setLiveSignals(EMPTY_SIGNALS);
     setLiveAnalysisReceived(false);
+    setLatestLiveResult(null);
     setLiveWindowIndex(0);
     setLiveWindowRange("Waiting for first 5-second analysis");
     setLiveRiskUpdatedAt(null);
@@ -874,7 +925,8 @@ export default function LiveDemo({ onAnalysisComplete }) {
 
               <div className="text-right">
                 <span className="block font-mono text-sm font-black text-cyan-300">
-                  Impersonation Risk {liveScore}%
+                  Impersonation Risk{" "}
+                  {liveScore == null ? "—" : `${liveScore}%`}
                 </span>
                 <span className="block text-[10px] text-slate-500">
                   {liveWindowRange}
@@ -912,13 +964,40 @@ export default function LiveDemo({ onAnalysisComplete }) {
         </div>
       </div>
 
-        <ExplainableCallInsights score={liveScore} running={running} />
+        <ExplainableCallInsights
+          result={latestLiveResult}
+          score={liveScore}
+          running={running}
+        />
 
         {/* =====================================================
           LIVE AI RECOMMENDATIONS — shown after first analysis
         ====================================================== */}
         {liveAnalysisReceived && (
           <section className="relative mt-5 overflow-hidden rounded-3xl border border-amber-400/20 bg-[#0c121e]/90 p-5 shadow-2xl backdrop-blur-xl md:p-7">
+            <div className="mb-5 rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+              <h4 className="text-sm font-bold text-white">
+                Latest live analysis response
+              </h4>
+              <p className="mt-2 text-xs leading-5 text-slate-300">
+                {typeof latestLiveResult?.transcript === "string"
+                  ? latestLiveResult.transcript
+                  : latestLiveResult?.transcript?.text ||
+                    "No speech transcription was returned for this audio window."}
+              </p>
+              <p className="mt-2 text-[11px] text-slate-400">
+                Engine action:{" "}
+                <span className="font-semibold text-cyan-300">
+                  {latestLiveResult?.live_status?.action ||
+                    latestLiveResult?.risk?.action ||
+                    "MONITOR"}
+                </span>
+                {latestLiveResult?.scam?.risk_level
+                  ? ` · Scam signal: ${latestLiveResult.scam.risk_level}`
+                  : ""}
+              </p>
+            </div>
+
             <div className="mb-5 flex items-center justify-between gap-3">
               <div>
                 <div className="flex items-center gap-2">
@@ -938,7 +1017,14 @@ export default function LiveDemo({ onAnalysisComplete }) {
               </span>
             </div>
 
-            <RecommendedActions score={liveScore} mode="live" />
+            {liveScore == null ? (
+              <p className="text-xs leading-5 text-slate-400">
+                Recommendations are unavailable because this window did not
+                produce a usable detector signal.
+              </p>
+            ) : (
+              <RecommendedActions score={liveScore} mode="live" />
+            )}
           </section>
         )}
 
